@@ -121,8 +121,16 @@ namespace ToolSet
                     if (fx != src.transform)
                     {
                         string path = GetChildRelativePath(fx);
-                        path = path.Substring(0, path.Length - fx.name.Length - 1);
-                        Debug.Log(path);
+                        // if (path == fx.name)
+                        // {
+                        //     path = path + "/";
+                        // }
+                        // else
+                        // {
+                        //     path = path.Substring(0, path.Length - fx.name.Length);
+                        // }
+                        path = path.Substring(0, path.Length - fx.name.Length);
+                        //Debug.Log(path);
                         fxPrefabs.Add(fx.gameObject,path);
                     }
                     
@@ -186,15 +194,19 @@ namespace ToolSet
             string path = child.name;
             Transform parent = child.parent;
             
-            while(parent != null && parent.parent != null) // 继续向上直到找到最顶层的父对象
+            while(parent != null) // 继续向上直到找到最顶层的父对象
             {
                 if (parent.gameObject == source.gameObject)
+                {
+                    path = "<root>" + "/" + path;
                     break;
+                }
+                    
                 path = parent.name + "/" + path;
     
                 parent = parent.parent;
             }
-            
+            Debug.Log("ChildRelativePath : " + path);
             // 如果需要的是相对于直接父对象的路径，可以简化上面的循环逻辑
             // 这里我们返回的是从根到该对象的完整路径
             return path;
@@ -211,7 +223,7 @@ namespace ToolSet
                 return null;
             }
                 
-    
+            
             // 按照'/'分割路径
             string[] parts = path.Split('/');
     
@@ -227,6 +239,10 @@ namespace ToolSet
                 
                 // 尝试找到名字匹配的子对象
                 //Debug.LogWarning(part);
+                if (part == "<root>")
+                {
+                    continue;
+                }
                 Transform child = parent.Find(part);
                 if (child == null)
                 {

@@ -36,7 +36,7 @@ public class ToolManagerWindow : EditorWindow
     {
        
         currentTab = GUILayout.Toolbar(currentTab, tabNames, GUILayout.Height(30));
- ;
+ 
         EditorGUILayout.Separator();
 
         // 获取当前工具实例并绘制
