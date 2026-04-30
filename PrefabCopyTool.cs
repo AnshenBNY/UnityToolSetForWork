@@ -10,10 +10,25 @@ namespace ToolSet
     /// 预制体复制工具
     /// 功能概述：
     /// 1. 复制预制体及其所有子预制体到指定目录
-    /// 2. 复制 MeshRenderer/SkinnedMeshRenderer 使用的材质
-    /// 3. 复制粒子系统使用的材质（包括主材质和拖尾材质）
-    /// 4. 复制粒子系统使用的网格资源
-    /// 5. 支持排除指定目录的资源不被复制
+    /// 2. 复制 MeshRenderer / SkinnedMeshRenderer 使用的材质
+    ///    （由 "复制材质" 按钮触发，输出到 materialsCopyPath）
+    /// 3. 复制粒子相关 Renderer 使用的材质，包括：
+    ///    - ParticleSystemRenderer 主材质 与 粒子拖尾(trails)材质
+    ///    - TrailRenderer 组件材质（独立拖尾组件）
+    ///    （由 "复制粒子材质" 按钮触发，输出到 FxMaterialsCopyPath）
+    /// 4. 复制粒子系统使用的网格资源（"复制粒子网格"按钮）
+    /// 5. 复制根预制体下 MeshFilter 引用的 mesh 资源（"复制 MeshFilter 网格"按钮）
+    ///    处理范围：根预制体散落节点 + 嵌套普通子 prefab 内部节点
+    ///    支持类型：独立 .mesh / .asset 资源 与 模型文件(.fbx 等)中的子 mesh
+    ///    自动安全跳过：嵌套模型类型预制体（PrefabAssetType.Model）的内部节点
+    ///    （这些 mesh 已由"复制预制体"阶段通过模型整体复制 + GUID 替换正确处理）
+    /// 6. 支持排除指定目录的资源不被复制
+    /// 
+    /// 职责分工：
+    ///   "复制材质" 与 "复制粒子材质" 两个按钮分工互斥，针对同一 prefab 选其一即可：
+    ///     - 模型类 prefab → 用 "复制材质"
+    ///     - 特效类 prefab（含 ParticleSystem / TrailRenderer）→ 用 "复制粒子材质"
+    ///     - 若特效 prefab 中同时含有 MeshRenderer 静态网格，仍由 "复制材质" 按钮处理
     /// 
     /// 使用流程：
     /// 1. 选择源预制体和输出目录
@@ -25,20 +40,12 @@ namespace ToolSet
     public class PrefabCopyTool : EditorWindow, IToolGUI
     {
         #region 字段定义
-        
+
         // ========== 预制体引用 ==========
         /// <summary>当前处理的源预制体（可以是Assets中的预制体或场景中的实例）</summary>
         private GameObject rootPrefab;
-        /// <summary>复制后的预制体实例（场景中）</summary>
-        private GameObject rootPrefabCopyIns;
         /// <summary>复制后的预制体资源（Assets中）</summary>
         private GameObject rootPrefabCopy;
-        /// <summary>材质预制体引用（暂未使用）</summary>
-        private GameObject matPrefab;
-        /// <summary>特效网格预制体引用（暂未使用）</summary>
-        private GameObject fxMeshPrefab;
-        /// <summary>特效材质预制体引用（暂未使用）</summary>
-        private GameObject fxMatPrefab;
 
         // ========== 路径配置 ==========
         /// <summary>复制后的根预制体路径</summary>
@@ -47,31 +54,23 @@ namespace ToolSet
         private List<DefaultAsset> excludeFolders = new List<DefaultAsset>();
         /// <summary>排除目录列表的滚动位置</summary>
         private Vector2 excludeScrollPosition;
-        /// <summary>输出文件夹</summary>
+        /// <summary>输出文件夹（运行时会写入下方各 *Path 字段）</summary>
         private DefaultAsset outputFolder;
 
-        // ========== 默认输出路径 ==========
-        /// <summary>预制体复制的默认根目录</summary>
-        private string newFolderPath = "Assets/PrefabCopies";
-        /// <summary>材质复制的默认目录</summary>
-        private string materialsCopyPath = "Assets/PrefabCopies/Materials";
-        /// <summary>贴图复制的默认目录（暂未使用）</summary>
-        private string texturesCopyPath = "Assets/PrefabCopies/Textures";
-        /// <summary>特效复制的默认根目录</summary>
-        private string FxCopyPath = "Assets/PrefabCopies/FX";
-        /// <summary>特效材质复制的默认目录</summary>
-        private string FxMaterialsCopyPath = "Assets/PrefabCopies/FX/Materials";
-        /// <summary>特效贴图复制的默认目录（暂未使用）</summary>
-        private string FxTexturesCopyPath = "Assets/PrefabCopies/FX/Textures";
-        /// <summary>特效模型/网格复制的默认目录</summary>
-        private string FxModelCopyPath = "Assets/PrefabCopies/FX/Models";
+        // ========== 输出路径（运行时由 outputFolder 决定，无需预设默认值） ==========
+        /// <summary>预制体复制的根目录（点击"复制预制体"时由 outputFolder 写入）</summary>
+        private string newFolderPath;
+        /// <summary>材质复制的目录（点击"复制材质"时由 outputFolder 写入）</summary>
+        private string materialsCopyPath;
+        /// <summary>特效材质复制的目录（点击"复制粒子材质"时由 outputFolder 写入）</summary>
+        private string FxMaterialsCopyPath;
+        /// <summary>特效模型/网格复制的目录（点击"复制粒子网格"时由 outputFolder 写入）</summary>
+        private string FxModelCopyPath;
 
         // ========== UI状态 ==========
         /// <summary>当前操作状态信息</summary>
         private string currentStatus = "等待开始";
-        /// <summary>主界面滚动位置</summary>
-        private Vector2 scrollPosition;
-        
+
         #endregion
     
             // ========== 菜单入口（已注释，通过ToolManagerWindow统一管理）==========
@@ -259,7 +258,37 @@ namespace ToolSet
                 CopyMeshFromParticle(rootPrefab);
                 currentStatus = "粒子网格复制完成";
             }
-    
+
+            EditorGUILayout.Space();
+
+            // 步骤5: 处理 MeshFilter 网格
+            if (GUILayout.Button("复制 MeshFilter 网格"))
+            {
+                if (rootPrefab == null)
+                {
+                    EditorUtility.DisplayDialog("错误", "请指定复制的预制体", "确定");
+                    EditorGUILayout.EndVertical();
+                    return;
+                }
+
+                if (!IsGameObjectInScene(rootPrefab))
+                {
+                    EditorUtility.DisplayDialog("错误", "此操作只能处理场景中的预制体", "确定");
+                    EditorGUILayout.EndVertical();
+                    return;
+                }
+
+                if (outputFolder == null)
+                {
+                    EditorUtility.DisplayDialog("错误", "请设置输出文件夹", "确定");
+                    EditorGUILayout.EndVertical();
+                    return;
+                }
+                FxModelCopyPath = AssetDatabase.GetAssetPath(outputFolder);
+                CopyMeshFromMeshFilter(rootPrefab);
+                currentStatus = "MeshFilter 网格复制完成";
+            }
+
             EditorGUILayout.EndVertical();
     
             EditorGUILayout.Space();
@@ -350,22 +379,9 @@ namespace ToolSet
             // 存储原始GUID到复制后GUID的映射关系
             Dictionary<string, string> prefabUIDs = new Dictionary<string, string>();
             AssetDatabase.Refresh();
-            
-            // 构建排除路径列表
-            List<string> excludePaths = new List<string>();
-            foreach (var excludeFolder in excludeFolders)
-            {
-                if (excludeFolder != null)
-                {
-                    string excludePath = AssetDatabase.GetAssetPath(excludeFolder);
-                    if (AssetDatabase.IsValidFolder(excludePath))
-                    {
-                        excludePaths.Add(excludePath);
-                        Debug.Log($"[预制体复制] 已添加排除目录: {excludePath}");
-                    }
-                }
-            }
-            
+
+            List<string> excludePaths = BuildExcludePaths("预制体复制");
+
             EditorUtility.DisplayProgressBar("处理中", "正在复制子预制体...", 0.1f);
             string copyPath = "";
             try
@@ -477,261 +493,182 @@ namespace ToolSet
         }
         
         /// <summary>
-        /// 从渲染器数组复制材质的具体实现
-        /// 处理逻辑：
-        /// 1. 遍历每个渲染器的所有材质槽
-        /// 2. 检查材质是否为.mat文件（排除内置材质）
-        /// 3. 检查材质是否在排除目录中
-        /// 4. 如果材质已复制过，直接使用已复制的版本
-        /// 5. 否则复制材质并更新引用
+        /// 从渲染器数组复制材质（基于通用核心方法）
+        /// 处理逻辑统一委托给 CopyAndReplaceRendererMaterials → CopySingleMaterialIfNeeded
         /// </summary>
         /// <param name="renderers">渲染器数组（MeshRenderer或SkinnedMeshRenderer）</param>
         /// <param name="copyPath">材质复制的目标目录</param>
         private void CopyMaterialFromRenderer(Renderer[] renderers, string copyPath)
         {
-            // 记录已复制的材质GUID，避免重复复制
+            // 跨渲染器共享 GUID 去重表，确保同一材质只复制一次
             List<string> sourceMatIDs = new List<string>();
-            string copyFilePath = "";
-            
-            // 构建排除路径列表
-            List<string> excludePaths = new List<string>();
-            foreach (var excludeFolder in excludeFolders)
-            {
-                if (excludeFolder != null)
-                {
-                    string excludePath = AssetDatabase.GetAssetPath(excludeFolder);
-                    if (AssetDatabase.IsValidFolder(excludePath))
-                    {
-                        excludePaths.Add(excludePath);
-                        Debug.Log($"[材质复制] 已添加排除目录: {excludePath}");
-                    }
-                }
-            }
-    
+            List<string> excludePaths = BuildExcludePaths("材质复制");
+
             foreach (var render in renderers)
             {
                 if (render == null) continue;
-    
-                Debug.Log($"[材质复制] 处理渲染器: {render.name}, 材质数量: {render.sharedMaterials.Length}");
-                Material[] updateList = new Material[render.sharedMaterials.Length];
-    
-                for (int i = 0; i < render.sharedMaterials.Length; i++)
-                {
-                    if (render.sharedMaterials[i] == null)
-                    {
-                        updateList[i] = null;
-                        continue;
-                    }
-    
-                    string path = AssetDatabase.GetAssetPath(render.sharedMaterials[i]);
-                    Debug.Log($"[材质复制] 材质路径: {path}");
-                    
-                    if (Path.GetExtension(path) == ".mat") // 判断是否是外部材质文件（排除内置材质）
-                    {
-                        string id = AssetDatabase.AssetPathToGUID(path);
-                        bool isExcluded = false;
-                        foreach (string excludePath in excludePaths)
-                        {
-                            if (path.StartsWith(excludePath))
-                            {
-                                isExcluded = true;
-                                break;
-                            }
-                        }
-                        
-                        if (isExcluded)
-                        {
-                            updateList[i] = render.sharedMaterials[i];
-                            continue; // 跳过排除目录
-                        }
-    
-                        if (sourceMatIDs.Contains(id))
-                        {
-                            copyFilePath = GenerateCopyPath(render.sharedMaterials[i], copyPath);
-                            Material copiedMat = (Material)AssetDatabase.LoadAssetAtPath(copyFilePath, typeof(Material));
-                            updateList[i] = copiedMat;
-                            continue;
-                        }
-    
-                        sourceMatIDs.Add(id);
-                        copyFilePath = CopyAssets(render.sharedMaterials[i], copyPath);
-                        AssetDatabase.Refresh();
-    
-                        if (!string.IsNullOrEmpty(copyFilePath))
-                        {
-                            Material copiedMat = (Material)AssetDatabase.LoadAssetAtPath(copyFilePath, typeof(Material));
-                            updateList[i] = copiedMat;
-                        }
-                        else
-                        {
-                            updateList[i] = render.sharedMaterials[i];
-                        }
-                    }
-                    else
-                    {
-                        updateList[i] = render.sharedMaterials[i];
-                    }
-                }
-    
-                
-    
+
+                CopyAndReplaceRendererMaterials(render, copyPath, sourceMatIDs, excludePaths, "材质复制");
                 AssetDatabase.Refresh();
-                // 更新渲染器的材质引用
-                render.sharedMaterials = updateList;
             }
         }
         
         /// <summary>
-        /// 从粒子系统复制材质
+        /// 从粒子相关Renderer复制材质（统一输出到 FxMaterialsCopyPath）
         /// 处理内容：
-        /// 1. ParticleSystemRenderer的主材质（sharedMaterial）
-        /// 2. 粒子拖尾材质（trailMaterial）
+        /// 1. ParticleSystemRenderer 的主材质（sharedMaterial）
+        /// 2. 粒子系统的拖尾材质（trails 模块的 trailMaterial）
+        /// 3. TrailRenderer 组件的材质（独立的拖尾组件）
+        /// 
+        /// 注意：MeshRenderer / SkinnedMeshRenderer 的材质统一由 "复制材质" 按钮
+        ///      （CopyMaterialsFromMeshRender）处理，本方法不再涵盖，避免重复复制。
+        /// 
+        /// 所有Renderer共用一份 sourceMatIDs，确保跨类型共享的材质只被复制一次
         /// </summary>
         /// <param name="instance">场景中的预制体实例</param>
         private void CopyMaterialsFromParticle(GameObject instance)
         {
-            // 获取所有粒子系统组件（包括子物体）
-            var particles = instance.GetComponentsInChildren<ParticleSystem>(true);
-            // 记录已复制的材质GUID，避免重复复制
+            // 跨所有 Renderer 共享 GUID 去重表，确保同一材质只复制一次
             List<string> sourceMatIDs = new List<string>();
-            string copyFilePath = "";
+            List<string> excludePaths = BuildExcludePaths("粒子材质");
 
             EditorUtility.DisplayProgressBar("处理中", "正在复制粒子材质...", 0.6f);
-            
-            // 构建排除路径列表
-            List<string> excludePaths = new List<string>();
-            foreach (var excludeFolder in excludeFolders)
-            {
-                if (excludeFolder != null)
-                {
-                    string excludePath = AssetDatabase.GetAssetPath(excludeFolder);
-                    if (AssetDatabase.IsValidFolder(excludePath))
-                    {
-                        excludePaths.Add(excludePath);
-                        Debug.Log($"[粒子材质] 已添加排除目录: {excludePath}");
-                    }
-                }
-            }
+
             try
             {
+                // ===== 1. 处理粒子系统主材质 与 内置拖尾(trails)材质 =====
+                var particles = instance.GetComponentsInChildren<ParticleSystem>(true);
                 foreach (ParticleSystem particle in particles)
                 {
                     ParticleSystemRenderer renderer = particle.GetComponent<ParticleSystemRenderer>();
-    
-                    if (renderer != null)
+                    if (renderer == null) continue;
+
+                    // 主材质（仅在渲染模式不为 None 时处理）
+                    if (renderer.renderMode != ParticleSystemRenderMode.None)
                     {
-                        // 处理主材质
-                        if (renderer.sharedMaterial != null && renderer.renderMode != ParticleSystemRenderMode.None)
-                        {
-                            string path = AssetDatabase.GetAssetPath(renderer.sharedMaterial);
-    
-                            bool isExcluded = false;
-                            foreach (string excludePath in excludePaths)
-                            {
-                                if (path.StartsWith(excludePath))
-                                {
-                                    isExcluded = true;
-                                    break;
-                                }
-                            }
-                            
-                            if (!isExcluded)
-                            {
-                                string id = AssetDatabase.AssetPathToGUID(path);
-    
-                                if (sourceMatIDs.Contains(id))
-                                {
-    
-                                    copyFilePath = GenerateCopyPath(renderer.sharedMaterial, FxMaterialsCopyPath);
-                                    if (!string.IsNullOrEmpty(copyFilePath))
-                                    {
-                                        Material copiedMat = (Material)AssetDatabase.LoadAssetAtPath(copyFilePath, typeof(Material));
-                                        renderer.sharedMaterial = copiedMat;
-                                    }
-                                    
-                                    
-                                }
-                                else
-                                {
-                                    sourceMatIDs.Add(id);
-                                    copyFilePath = CopyAssets(renderer.sharedMaterial, FxMaterialsCopyPath);
-                                    AssetDatabase.Refresh();
-    
-                                    if (!string.IsNullOrEmpty(copyFilePath))
-                                    {
-                                        Material copiedMat = (Material)AssetDatabase.LoadAssetAtPath(copyFilePath, typeof(Material));
-                                        renderer.sharedMaterial = copiedMat;
-                                    }
-                                }
-                            }
-    
-                           
-    
-                           
-                        }
-    
-                        // 处理Trail材质（如果有）
-                        var trailModule = particle.trails;
-                        if (trailModule.enabled && renderer is ParticleSystemRenderer psRenderer)
-                        {
-                            if (psRenderer.trailMaterial != null)
-                            {
-                                string trailPath = AssetDatabase.GetAssetPath(psRenderer.trailMaterial);
-    
-                                bool isExcluded = false;
-                                foreach (string excludePath in excludePaths)
-                                {
-                                    if (trailPath.StartsWith(excludePath))
-                                    {
-                                        isExcluded = true;
-                                        break;
-                                    }
-                                }
-                                
-                                if (!isExcluded)
-                                {
-                                    string trailId = AssetDatabase.AssetPathToGUID(trailPath);
-    
-                                    if (sourceMatIDs.Contains(trailId))
-                                    {
-                                        string trailCopyPath = GenerateCopyPath(psRenderer.trailMaterial, FxMaterialsCopyPath);
-                                        if (!string.IsNullOrEmpty(trailCopyPath))
-                                        {
-                                            Material copiedTrailMat = (Material)AssetDatabase.LoadAssetAtPath(trailCopyPath, typeof(Material));
-                                            psRenderer.trailMaterial = copiedTrailMat;
-    
-                                        }
-    
-                                    }
-                                    else
-                                    {
-                                        sourceMatIDs.Add(trailId);
-                                        string trailCopyPath = CopyAssets(psRenderer.trailMaterial, FxMaterialsCopyPath);
-                                        AssetDatabase.Refresh();
-    
-                                        if (!string.IsNullOrEmpty(trailCopyPath))
-                                        {
-                                            Material copiedTrailMat = (Material)AssetDatabase.LoadAssetAtPath(trailCopyPath, typeof(Material));
-                                            psRenderer.trailMaterial = copiedTrailMat;
-                                            
-                                        }
-    
-                                    } 
-                                }
-    
-                                
-                            }
-                        }
+                        renderer.sharedMaterial = CopySingleMaterialIfNeeded(
+                            renderer.sharedMaterial, FxMaterialsCopyPath, sourceMatIDs, excludePaths, "粒子材质");
                     }
-    
+
+                    // 粒子系统内置拖尾(trails 模块)材质
+                    if (particle.trails.enabled)
+                    {
+                        renderer.trailMaterial = CopySingleMaterialIfNeeded(
+                            renderer.trailMaterial, FxMaterialsCopyPath, sourceMatIDs, excludePaths, "粒子材质");
+                    }
+
                     AssetDatabase.Refresh();
                 }
-                
+
+                // ===== 2. 处理独立 TrailRenderer 组件的材质 =====
+                // 注意：这里是独立 TrailRenderer 组件，与上面 ParticleSystem.trails 内置拖尾不同
+                var trailRenderers = instance.GetComponentsInChildren<TrailRenderer>(true);
+                Debug.Log($"[粒子材质] 检测到 TrailRenderer 数量: {trailRenderers.Length}");
+                foreach (TrailRenderer trailRenderer in trailRenderers)
+                {
+                    CopyAndReplaceRendererMaterials(trailRenderer, FxMaterialsCopyPath, sourceMatIDs, excludePaths, "Trail材质");
+                    AssetDatabase.Refresh();
+                }
             }
             finally
             {
                 EditorUtility.ClearProgressBar();
             }
+        }
+
+        /// <summary>
+        /// 通用：复制单个材质到目标目录，并返回副本引用（核心材质复制逻辑）
+        /// 处理流程：
+        /// 1. 跳过空材质、非 .mat 的内置材质 → 原样返回
+        /// 2. 命中排除目录 → 原样返回
+        /// 3. 已复制过（命中 GUID 去重表）→ 加载并返回已存在的副本
+        /// 4. 否则复制材质到目标目录，记录 GUID，返回副本
+        /// 
+        /// 适用于：MeshRenderer.sharedMaterials / ParticleSystemRenderer.sharedMaterial
+        ///        / ParticleSystemRenderer.trailMaterial / TrailRenderer.sharedMaterials 等任意材质字段
+        /// </summary>
+        /// <param name="sourceMat">源材质</param>
+        /// <param name="copyPath">复制目标目录</param>
+        /// <param name="sourceMatIDs">已复制材质的 GUID 列表（外部共享，跨调用去重）</param>
+        /// <param name="excludePaths">排除目录路径列表</param>
+        /// <param name="logTag">日志标签，便于区分调用来源</param>
+        /// <returns>替换后的材质引用（可能是副本，也可能是原材质）</returns>
+        private Material CopySingleMaterialIfNeeded(Material sourceMat, string copyPath, List<string> sourceMatIDs, List<string> excludePaths, string logTag)
+        {
+            if (sourceMat == null) return null;
+
+            string path = AssetDatabase.GetAssetPath(sourceMat);
+
+            // 仅处理外部 .mat 材质，内置材质保持原引用
+            if (Path.GetExtension(path) != ".mat")
+            {
+                return sourceMat;
+            }
+
+            // 排除目录检查
+            foreach (string excludePath in excludePaths)
+            {
+                if (path.StartsWith(excludePath))
+                {
+                    return sourceMat;
+                }
+            }
+
+            string id = AssetDatabase.AssetPathToGUID(path);
+            string copyFilePath;
+
+            if (sourceMatIDs.Contains(id))
+            {
+                // 已经复制过该材质，直接复用副本
+                copyFilePath = GenerateCopyPath(sourceMat, copyPath);
+                if (!string.IsNullOrEmpty(copyFilePath))
+                {
+                    Material copiedMat = (Material)AssetDatabase.LoadAssetAtPath(copyFilePath, typeof(Material));
+                    return copiedMat != null ? copiedMat : sourceMat;
+                }
+                return sourceMat;
+            }
+
+            sourceMatIDs.Add(id);
+            copyFilePath = CopyAssets(sourceMat, copyPath);
+            AssetDatabase.Refresh();
+
+            if (!string.IsNullOrEmpty(copyFilePath))
+            {
+                Material copiedMat = (Material)AssetDatabase.LoadAssetAtPath(copyFilePath, typeof(Material));
+                Debug.Log($"[{logTag}] 已复制材质: {sourceMat.name} -> {copyFilePath}");
+                return copiedMat != null ? copiedMat : sourceMat;
+            }
+
+            return sourceMat;
+        }
+
+        /// <summary>
+        /// 通用：处理 Renderer 的 sharedMaterials 数组，逐槽复制材质到目标目录并更新引用
+        /// 适用于：MeshRenderer / SkinnedMeshRenderer / TrailRenderer 等带 sharedMaterials 数组的 Renderer
+        /// （ParticleSystemRenderer 的主材质和拖尾材质字段独立，建议直接使用 CopySingleMaterialIfNeeded）
+        /// </summary>
+        /// <param name="renderer">需要处理的 Renderer 组件</param>
+        /// <param name="copyPath">复制目标目录</param>
+        /// <param name="sourceMatIDs">已复制材质的 GUID 列表（外部共享，跨调用去重）</param>
+        /// <param name="excludePaths">排除目录路径列表</param>
+        /// <param name="logTag">日志标签</param>
+        private void CopyAndReplaceRendererMaterials(Renderer renderer, string copyPath, List<string> sourceMatIDs, List<string> excludePaths, string logTag)
+        {
+            if (renderer == null) return;
+
+            Material[] sharedMats = renderer.sharedMaterials;
+            if (sharedMats == null || sharedMats.Length == 0) return;
+
+            Material[] updateList = new Material[sharedMats.Length];
+
+            for (int i = 0; i < sharedMats.Length; i++)
+            {
+                updateList[i] = CopySingleMaterialIfNeeded(sharedMats[i], copyPath, sourceMatIDs, excludePaths, logTag);
+            }
+
+            renderer.sharedMaterials = updateList;
+            Debug.Log($"[{logTag}] 已处理 Renderer: {renderer.name}, 材质槽数: {sharedMats.Length}");
         }
         
         #endregion
@@ -750,22 +687,8 @@ namespace ToolSet
             var particles = instance.GetComponentsInChildren<ParticleSystem>(true);
             // 记录已复制的网格GUID，避免重复复制
             List<string> sourceMeshIDs = new List<string>();
-            
-            // 构建排除路径列表
-            List<string> excludePaths = new List<string>();
-            foreach (var excludeFolder in excludeFolders)
-            {
-                if (excludeFolder != null)
-                {
-                    string excludePath = AssetDatabase.GetAssetPath(excludeFolder);
-                    if (AssetDatabase.IsValidFolder(excludePath))
-                    {
-                        excludePaths.Add(excludePath);
-                        Debug.Log($"[粒子网格] 已添加排除目录: {excludePath}");
-                    }
-                }
-            }
-    
+            List<string> excludePaths = BuildExcludePaths("粒子网格");
+
             string copyFilePath = "";
             EditorUtility.DisplayProgressBar("处理中", "正在复制粒子网格...", 0.9f);
     
@@ -825,7 +748,141 @@ namespace ToolSet
                 EditorUtility.ClearProgressBar();
             }
         }
-        
+
+        /// <summary>
+        /// 从 MeshFilter 复制 mesh 资源（与 CopyMeshFromParticle 行为对齐）
+        /// 处理对象：
+        ///   - 根预制体自身散落节点的 MeshFilter
+        ///   - 嵌套普通 prefab 实例内部节点的 MeshFilter（保存时 ApplyPrefabInstance 会写回子 prefab）
+        ///   支持 mesh 类型：独立 .mesh / .asset 资源 与 模型文件(.fbx 等)中的子 mesh
+        /// 
+        /// 安全跳过：嵌套模型类型预制体（PrefabAssetType.Model）实例的内部节点
+        ///   原因：mesh 引用已在"复制预制体"阶段通过整体复制 + GUID 替换正确指向新 .fbx
+        ///        若再处理会被替换为另一个独立副本，破坏模型整体复制的引用链
+        /// 
+        /// 模型文件 mesh 复制逻辑参考 ReplaceParticleMesh：
+        ///   - 副本是独立 mesh 资源 → 直接加载赋值
+        ///   - 副本是模型文件 → 按原 mesh 名称匹配模型内对应子 mesh
+        /// </summary>
+        /// <param name="instance">场景中的预制体实例（根预制体）</param>
+        private void CopyMeshFromMeshFilter(GameObject instance)
+        {
+            var meshFilters = instance.GetComponentsInChildren<MeshFilter>(true);
+            List<string> sourceMeshIDs = new List<string>();
+            List<string> excludePaths = BuildExcludePaths("MeshFilter网格");
+
+            EditorUtility.DisplayProgressBar("处理中", "正在复制 MeshFilter 网格...", 0.5f);
+
+            int skippedModelPrefab = 0;
+
+            try
+            {
+                foreach (MeshFilter filter in meshFilters)
+                {
+                    if (filter == null || filter.sharedMesh == null) continue;
+
+                    // 关键安全过滤：仅跳过嵌套模型预制体内部节点（普通子 prefab 内部节点正常处理）
+                    if (IsInsideModelPrefabInstance(filter.gameObject, instance))
+                    {
+                        skippedModelPrefab++;
+                        continue;
+                    }
+
+                    string meshPath = AssetDatabase.GetAssetPath(filter.sharedMesh);
+                    if (string.IsNullOrEmpty(meshPath)) continue; // 运行时生成的 mesh
+
+                    // 排除目录检查
+                    bool isExcluded = false;
+                    foreach (string excludePath in excludePaths)
+                    {
+                        if (meshPath.StartsWith(excludePath))
+                        {
+                            isExcluded = true;
+                            break;
+                        }
+                    }
+                    if (isExcluded) continue;
+
+                    string id = AssetDatabase.AssetPathToGUID(meshPath);
+                    string copyFilePath;
+                    Object sourceAsset = AssetDatabase.LoadAssetAtPath(meshPath, typeof(Object));
+
+                    if (sourceMeshIDs.Contains(id))
+                    {
+                        // 已复制过，直接复用副本
+                        copyFilePath = GenerateCopyPath(sourceAsset, FxModelCopyPath);
+                    }
+                    else
+                    {
+                        sourceMeshIDs.Add(id);
+                        copyFilePath = CopyAssets(sourceAsset, FxModelCopyPath);
+                        AssetDatabase.Refresh();
+                    }
+
+                    if (!string.IsNullOrEmpty(copyFilePath))
+                    {
+                        ReplaceMeshFilterMesh(filter, copyFilePath);
+                    }
+
+                    AssetDatabase.Refresh();
+                }
+
+                if (skippedModelPrefab > 0)
+                {
+                    Debug.Log($"[MeshFilter网格] 已安全跳过嵌套模型预制体内部节点 {skippedModelPrefab} 个" +
+                              "（这些 mesh 引用已由复制预制体阶段通过 GUID 替换正确处理）");
+                }
+            }
+            finally
+            {
+                EditorUtility.ClearProgressBar();
+            }
+        }
+
+        /// <summary>
+        /// 替换 MeshFilter 的 mesh 引用（处理逻辑参考 ReplaceParticleMesh）
+        /// 兼容两种副本形态：
+        ///   1. 副本是独立的 .mesh / .asset 文件 → 直接加载并赋值
+        ///   2. 副本是模型文件（.fbx 等） → 从中按原 mesh 名称匹配对应子 mesh
+        /// </summary>
+        /// <param name="filter">需要更新引用的 MeshFilter</param>
+        /// <param name="meshPath">复制后资源的路径</param>
+        private void ReplaceMeshFilterMesh(MeshFilter filter, string meshPath)
+        {
+            var loaded = AssetDatabase.LoadAssetAtPath(meshPath, typeof(Object));
+            if (loaded == null)
+            {
+                Debug.LogError($"[MeshFilter网格] 副本加载失败: {meshPath}");
+                return;
+            }
+
+            // 情况 1：独立 mesh 资源
+            if (loaded is Mesh meshAsset)
+            {
+                filter.sharedMesh = meshAsset;
+                Debug.Log($"[MeshFilter网格] 网格替换成功: {filter.name} -> {meshPath}");
+                return;
+            }
+
+            // 情况 2：模型文件（GameObject 根），按原 mesh 名匹配子 mesh
+            if (loaded is GameObject modelGo)
+            {
+                Mesh originalMesh = filter.sharedMesh;
+                var filtersInModel = modelGo.GetComponentsInChildren<MeshFilter>(true);
+                foreach (var f in filtersInModel)
+                {
+                    if (f.sharedMesh != null && originalMesh != null
+                        && f.sharedMesh.name == originalMesh.name)
+                    {
+                        filter.sharedMesh = f.sharedMesh;
+                        Debug.Log($"[MeshFilter网格] 从模型中匹配网格成功: {filter.name} -> {f.sharedMesh.name}");
+                        return;
+                    }
+                }
+                Debug.LogWarning($"[MeshFilter网格] 模型 {meshPath} 中未找到与 '{originalMesh?.name}' 同名的子 mesh");
+            }
+        }
+
         #endregion
         
         #region 资源复制工具方法
@@ -984,6 +1041,29 @@ namespace ToolSet
             return copyFilePath;
         }
         
+        /// <summary>
+        /// 根据 excludeFolders 字段构建排除目录路径列表
+        /// 多个材质/网格复制方法共用此方法，避免重复代码
+        /// </summary>
+        /// <param name="logTag">日志标签，便于区分调用来源</param>
+        /// <returns>有效排除目录的路径列表（相对 Assets 路径）</returns>
+        private List<string> BuildExcludePaths(string logTag)
+        {
+            List<string> excludePaths = new List<string>();
+            foreach (var excludeFolder in excludeFolders)
+            {
+                if (excludeFolder == null) continue;
+
+                string excludePath = AssetDatabase.GetAssetPath(excludeFolder);
+                if (AssetDatabase.IsValidFolder(excludePath))
+                {
+                    excludePaths.Add(excludePath);
+                    Debug.Log($"[{logTag}] 已添加排除目录: {excludePath}");
+                }
+            }
+            return excludePaths;
+        }
+
         /// <summary>
         /// 获取资源的GUID
         /// </summary>
@@ -1152,6 +1232,46 @@ namespace ToolSet
         
         #region 工具辅助方法
         
+        /// <summary>
+        /// 判定 GameObject 是否处于"嵌套模型类型预制体实例"的内部（含其根节点本身）
+        /// 
+        /// 实现策略：基于资源路径 + AssetImporter 类型判定
+        ///   1. 用 PrefabUtility.GetPrefabAssetPathOfNearestInstanceRoot(go) 取 go 所属的最近 prefab 实例资源路径
+        ///      该 API 天然包含 go 自身节点（若 go 自己就是 prefab 实例根，返回的就是它对应的资源路径），
+        ///      不依赖 IsAnyPrefabInstanceRoot 在嵌套场景下的细微差异
+        ///   2. 与 rootInstance 的 prefab 路径比对，相同则属于"非嵌套（同属当前根 prefab）"，不跳过
+        ///   3. 用 AssetImporter is ModelImporter 判定该路径是否为模型文件（.fbx / .obj / .blend 等）
+        ///      —— 这是判定"模型 prefab"最权威的方式，不依赖 PrefabAssetType.Model
+        ///         （注意：从 .fbx 中拖出后另存为 .prefab 的资源，PrefabAssetType 是 Regular 而非 Model，
+        ///         但其原始网格仍由模型 prefab 提供。本方法只关心"嵌套实例的资源本身是否为模型文件"）
+        /// 
+        /// 用途：mesh 替换流程中安全跳过模型预制体内部节点，避免破坏"复制预制体"阶段
+        ///       已通过整体复制 + GUID 替换建立的引用链
+        /// 
+        /// 注意：仅过滤模型预制体；嵌套的普通子 prefab 内部节点不会被跳过
+        /// </summary>
+        /// <param name="go">待判定的 GameObject</param>
+        /// <param name="rootInstance">工具当前处理的根预制体实例</param>
+        /// <returns>true-属于嵌套模型预制体内部；false-属于根预制体或非模型类嵌套节点</returns>
+        private bool IsInsideModelPrefabInstance(GameObject go, GameObject rootInstance)
+        {
+            if (go == null || rootInstance == null) return false;
+            if (go == rootInstance) return false;
+            if (!PrefabUtility.IsPartOfPrefabInstance(go)) return false;
+
+            // 直接拿"go 所属的最近 prefab 实例"对应的资源路径（API 已天然包含 go 自身节点）
+            string nearestPath = PrefabUtility.GetPrefabAssetPathOfNearestInstanceRoot(go);
+            if (string.IsNullOrEmpty(nearestPath)) return false;
+
+            // 同属当前 rootInstance（即不是嵌套），不跳过
+            string rootPath = PrefabUtility.GetPrefabAssetPathOfNearestInstanceRoot(rootInstance);
+            if (nearestPath == rootPath) return false;
+
+            // 用 AssetImporter 判定：模型文件(.fbx/.obj/.blend 等)的 importer 必为 ModelImporter
+            var importer = AssetImporter.GetAtPath(nearestPath);
+            return importer is ModelImporter;
+        }
+
         /// <summary>
         /// 判断GameObject是否在场景中
         /// 用于区分：
