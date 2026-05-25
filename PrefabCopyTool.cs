@@ -1,8 +1,12 @@
 using UnityEngine;
 using UnityEditor;
+using UnityEditor.Animations;
 using System.IO;
 using System.Collections.Generic;
+using System.Linq;
 using UnityEngine.SceneManagement;
+using UnityEngine.Playables;
+using UnityEngine.Timeline;
 
 namespace ToolSet
 {
@@ -22,7 +26,13 @@ namespace ToolSet
     ///    支持类型：独立 .mesh / .asset 资源 与 模型文件(.fbx 等)中的子 mesh
     ///    自动安全跳过：嵌套模型类型预制体（PrefabAssetType.Model）的内部节点
     ///    （这些 mesh 已由"复制预制体"阶段通过模型整体复制 + GUID 替换正确处理）
-    /// 6. 支持排除指定目录的资源不被复制
+    /// 6. 复制 PlayableDirector / Animator 使用的 Timeline(.playable) 与 Controller(.controller) 资源，
+    ///    以及其中引用的动画片段；动画若来自模型文件(.fbx 等)则复制整个模型文件（"复制动画 Timeline"按钮）
+    ///    复制 Timeline 后会自动恢复 PlayableDirector 轨道绑定（Animator / GameObject 等）及 ExposedReference
+    /// 7. 支持排除指定目录的资源不被复制
+    /// 8. "一键复制所有" / "一键复制并保存" 按面板顺序依次执行全部复制步骤；后者额外自动保存预制体
+    ///    一键复制时会在输出文件夹下自动创建 Prefabs / Materials / FxMaterials / Meshes / Animations 子目录
+    ///    一键复制仅支持 Assets 中的预制体资源，不可使用场景中的预制体实例
     /// 
     /// 职责分工：
     ///   "复制材质" 与 "复制粒子材质" 两个按钮分工互斥，针对同一 prefab 选其一即可：
@@ -66,6 +76,15 @@ namespace ToolSet
         private string FxMaterialsCopyPath;
         /// <summary>特效模型/网格复制的目录（点击"复制粒子网格"时由 outputFolder 写入）</summary>
         private string FxModelCopyPath;
+        /// <summary>动画 / Timeline 复制的目录（点击"复制动画 Timeline"时由 outputFolder 写入）</summary>
+        private string animationCopyPath;
+
+        // ========== 一键复制分类子目录名 ==========
+        private const string SubDirPrefabs = "Prefabs";
+        private const string SubDirMaterials = "Materials";
+        private const string SubDirFxMaterials = "FxMaterials";
+        private const string SubDirMeshes = "Meshes";
+        private const string SubDirAnimations = "Animations";
 
         // ========== UI状态 ==========
         /// <summary>当前操作状态信息</summary>
@@ -100,8 +119,20 @@ namespace ToolSet
             EditorGUILayout.BeginVertical("box");
            
             EditorGUILayout.Space();
+            DrawSectionSeparator("基础配置");
     
             rootPrefab = (GameObject)EditorGUILayout.ObjectField("当前处理预制体:", rootPrefab, typeof(GameObject), true);
+            if (rootPrefab != null && IsGameObjectInScene(rootPrefab))
+            {
+                EditorGUILayout.HelpBox(
+                    "当前为场景中的预制体实例。一键复制请从 Project 窗口拖入 Assets 中的预制体资源；分步操作（复制材质等）可使用场景实例。",
+                    MessageType.Warning);
+            }
+            else if (rootPrefab != null)
+            {
+                EditorGUILayout.HelpBox("当前为 Assets 预制体资源，可直接使用一键复制。", MessageType.Info);
+            }
+
             outputFolder = EditorGUILayout.ObjectField("输出文件夹：", outputFolder, typeof(DefaultAsset), false) as DefaultAsset;
             if (GUILayout.Button("添加排除目录"))
             {
@@ -128,7 +159,23 @@ namespace ToolSet
                 EditorGUILayout.EndHorizontal();
             }
             EditorGUILayout.EndScrollView();
-            EditorGUILayout.Space();
+
+            DrawSectionSeparator("一键操作");
+            EditorGUILayout.HelpBox(
+                "请先将 Project 中的预制体资源拖入「当前处理预制体」（不可使用场景实例）。\n" +
+                "按顺序执行各复制步骤，并在输出文件夹下自动创建子目录：\n" +
+                "Prefabs / Materials / FxMaterials / Meshes / Animations",
+                MessageType.None);
+            if (GUILayout.Button("一键复制所有", GUILayout.Height(30)))
+            {
+                TryExecuteCopyAllSteps();
+            }
+            if (GUILayout.Button("一键复制并保存", GUILayout.Height(30)))
+            {
+                TryExecuteCopyAllAndSaveSteps();
+            }
+
+            DrawSectionSeparator("分步复制");
            
             // 步骤1: 复制预制体
             //EditorGUILayout.LabelField("# 复制预制体", EditorStyles.boldLabel);
@@ -289,39 +336,47 @@ namespace ToolSet
                 currentStatus = "MeshFilter 网格复制完成";
             }
 
+            EditorGUILayout.Space();
+
+            // 步骤6: 处理 Animator / PlayableDirector 动画与 Timeline
+            if (GUILayout.Button("复制动画 Timeline"))
+            {
+                if (rootPrefab == null)
+                {
+                    EditorUtility.DisplayDialog("错误", "请指定复制的预制体", "确定");
+                    EditorGUILayout.EndVertical();
+                    return;
+                }
+
+                if (!IsGameObjectInScene(rootPrefab))
+                {
+                    EditorUtility.DisplayDialog("错误", "此操作只能处理场景中的预制体", "确定");
+                    EditorGUILayout.EndVertical();
+                    return;
+                }
+
+                if (outputFolder == null)
+                {
+                    EditorUtility.DisplayDialog("错误", "请设置输出文件夹", "确定");
+                    EditorGUILayout.EndVertical();
+                    return;
+                }
+                animationCopyPath = AssetDatabase.GetAssetPath(outputFolder);
+                CopyAnimationAndTimeline(rootPrefab);
+                currentStatus = "动画 Timeline 复制完成";
+            }
+
             EditorGUILayout.EndVertical();
     
             EditorGUILayout.Space();
-    
-            // 显示复制后的预制体引用
-            
+
             EditorGUILayout.BeginVertical("box");
-            
-            //EditorGUILayout.LabelField("复制后的预制体:");
+            DrawSectionSeparator("保存预制体");
             rootPrefabCopy = (GameObject)EditorGUILayout.ObjectField("复制后的预制体:", rootPrefabCopy, typeof(GameObject), false);
             
             if (GUILayout.Button("保存当前处理预制体"))
             {
-                if (rootPrefab != null)
-                {
-                    if(PrefabUtility.IsAnyPrefabInstanceRoot(rootPrefab))
-                    {
-                        ApplyModificationsRecursively(rootPrefab.transform);
-                        currentStatus = "保存成功";
-                        EditorUtility.DisplayDialog("", "保存成功!", "确定");
-                    }
-                    else
-                    {
-                        EditorUtility.DisplayDialog("错误", "当前预制体已解包！保存失败", "确定");
-                        
-                    }
-                       
-                }
-                else
-                {
-                    EditorUtility.DisplayDialog("错误", "预制体实例丢失！保存失败", "确定");
-                    
-                }
+                TrySaveCurrentPrefab();
             }
             EditorGUILayout.EndVertical();
             EditorGUILayout.Space();
@@ -336,11 +391,182 @@ namespace ToolSet
     
             // 显示当前状态
             EditorGUILayout.BeginVertical("box");
-            EditorGUILayout.LabelField("当前状态", EditorStyles.boldLabel);
+            DrawSectionSeparator("当前状态");
             EditorGUILayout.HelpBox(currentStatus, MessageType.Info);
             EditorGUILayout.EndVertical();
         }
+
+        /// <summary>
+        /// 绘制模块分隔线及标题
+        /// </summary>
+        private void DrawSectionSeparator(string title)
+        {
+            EditorGUILayout.Space(6);
+            Rect lineRect = EditorGUILayout.GetControlRect(false, 1);
+            EditorGUI.DrawRect(lineRect, new Color(0.4f, 0.4f, 0.4f, 0.8f));
+            EditorGUILayout.Space(4);
+            if (!string.IsNullOrEmpty(title))
+            {
+                EditorGUILayout.LabelField(title, EditorStyles.boldLabel);
+            }
+        }
         
+        #endregion
+
+        #region 一键复制
+
+        /// <summary>
+        /// 按 UI 面板顺序依次执行全部复制步骤，完成后自动保存预制体
+        /// </summary>
+        private void TryExecuteCopyAllAndSaveSteps()
+        {
+            if (!TryExecuteCopyAllSteps(showSuccessDialog: false))
+            {
+                return;
+            }
+
+            if (TrySaveCurrentPrefab(showSuccessDialog: false))
+            {
+                currentStatus = "一键复制并保存完成";
+                EditorUtility.DisplayDialog("", "一键复制并保存完成!", "确定");
+            }
+        }
+
+        /// <summary>
+        /// 保存当前场景中的预制体实例修改到 Assets
+        /// </summary>
+        private bool TrySaveCurrentPrefab(bool showSuccessDialog = true)
+        {
+            if (rootPrefab == null)
+            {
+                EditorUtility.DisplayDialog("错误", "预制体实例丢失！保存失败", "确定");
+                return false;
+            }
+
+            if (!PrefabUtility.IsAnyPrefabInstanceRoot(rootPrefab))
+            {
+                EditorUtility.DisplayDialog("错误", "当前预制体已解包！保存失败", "确定");
+                return false;
+            }
+
+            ApplyModificationsRecursively(rootPrefab.transform);
+            currentStatus = "保存成功";
+            if (showSuccessDialog)
+            {
+                EditorUtility.DisplayDialog("", "保存成功!", "确定");
+            }
+
+            return true;
+        }
+
+        /// <summary>
+        /// 按 UI 面板顺序依次执行全部复制步骤
+        /// 1. 复制预制体（源对象为 Assets 预制体时）
+        /// 2. 复制材质 → 复制粒子材质 → 复制粒子网格 → 复制 MeshFilter 网格 → 复制动画 Timeline
+        /// </summary>
+        /// <param name="showSuccessDialog">是否在完成后弹出成功提示</param>
+        /// <returns>是否全部执行成功</returns>
+        private bool TryExecuteCopyAllSteps(bool showSuccessDialog = true)
+        {
+            if (rootPrefab == null)
+            {
+                EditorUtility.DisplayDialog("错误", "请指定复制的预制体", "确定");
+                return false;
+            }
+
+            if (outputFolder == null)
+            {
+                EditorUtility.DisplayDialog("错误", "请设置输出文件夹", "确定");
+                return false;
+            }
+
+            if (IsGameObjectInScene(rootPrefab))
+            {
+                EditorUtility.DisplayDialog("错误",
+                    "一键复制请使用 Assets 中的预制体资源，不能拖入场景中的实例。\n请从 Project 窗口重新指定源预制体。",
+                    "确定");
+                return false;
+            }
+
+            string outputPath = AssetDatabase.GetAssetPath(outputFolder);
+            SetupCategorizedOutputPaths(outputPath);
+
+            try
+            {
+                AssetDatabase.Refresh();
+                rootPrefab = CopyRootPrefab();
+                if (rootPrefab == null)
+                {
+                    currentStatus = "一键复制失败：预制体复制未成功";
+                    return false;
+                }
+
+                CopyMaterialsFromMeshRender(rootPrefab);
+                CopyMaterialsFromParticle(rootPrefab);
+                CopyMeshFromParticle(rootPrefab);
+                CopyMeshFromMeshFilter(rootPrefab);
+                CopyAnimationAndTimeline(rootPrefab);
+
+                currentStatus = "一键复制全部完成";
+                if (showSuccessDialog)
+                {
+                    EditorUtility.DisplayDialog("", "一键复制全部完成!", "确定");
+                }
+                return true;
+            }
+            catch (System.Exception ex)
+            {
+                Debug.LogException(ex);
+                currentStatus = "一键复制失败: " + ex.Message;
+                EditorUtility.DisplayDialog("错误", "一键复制过程中发生错误，详见 Console", "确定");
+                return false;
+            }
+            finally
+            {
+                EditorUtility.ClearProgressBar();
+            }
+        }
+
+        /// <summary>
+        /// 一键复制：在输出根目录下创建分类子目录，并写入各模块输出路径
+        /// </summary>
+        private void SetupCategorizedOutputPaths(string rootOutputPath)
+        {
+            newFolderPath = EnsureAssetFolder(rootOutputPath, SubDirPrefabs);
+            materialsCopyPath = EnsureAssetFolder(rootOutputPath, SubDirMaterials);
+            FxMaterialsCopyPath = EnsureAssetFolder(rootOutputPath, SubDirFxMaterials);
+            FxModelCopyPath = EnsureAssetFolder(rootOutputPath, SubDirMeshes);
+            animationCopyPath = EnsureAssetFolder(rootOutputPath, SubDirAnimations);
+
+            Debug.Log($"[一键复制] 输出目录已分类：\n" +
+                      $"  预制体 -> {newFolderPath}\n" +
+                      $"  材质 -> {materialsCopyPath}\n" +
+                      $"  粒子材质 -> {FxMaterialsCopyPath}\n" +
+                      $"  网格 -> {FxModelCopyPath}\n" +
+                      $"  动画/Timeline -> {animationCopyPath}");
+        }
+
+        /// <summary>
+        /// 确保 Assets 目录存在，不存在则创建
+        /// </summary>
+        private string EnsureAssetFolder(string parentPath, string folderName)
+        {
+            if (string.IsNullOrEmpty(parentPath) || string.IsNullOrEmpty(folderName))
+            {
+                return parentPath;
+            }
+
+            string targetPath = parentPath + "/" + folderName;
+            if (AssetDatabase.IsValidFolder(targetPath))
+            {
+                return targetPath;
+            }
+
+            AssetDatabase.CreateFolder(parentPath, folderName);
+            AssetDatabase.Refresh();
+            return targetPath;
+        }
+
         #endregion
         
         #region 预制体复制核心方法
@@ -884,6 +1110,947 @@ namespace ToolSet
         }
 
         #endregion
+
+        #region 动画 Timeline 复制方法
+
+        /// <summary>
+        /// 复制预制体中 PlayableDirector / Animator 使用的 Timeline、Controller 及引用的动画资源
+        /// 流程：
+        /// 1. 收集所有 Animator / PlayableDirector 引用的 Controller、Timeline 与 AnimationClip
+        /// 2. 先复制动画依赖（独立 .anim 或整个模型文件 .fbx 等），建立 GUID 映射
+        /// 3. 复制 Controller / Timeline 资源，并替换其 YAML 内的动画 GUID 引用
+        /// 4. 更新组件上的 Controller / Timeline 引用
+        /// 跨组件共享 copiedAssetIDs，确保重复引用的资源只复制一次
+        /// </summary>
+        /// <param name="instance">场景中的预制体实例</param>
+        private void CopyAnimationAndTimeline(GameObject instance)
+        {
+            List<string> copiedAssetIDs = new List<string>();
+            Dictionary<string, string> guidMap = new Dictionary<string, string>();
+            Dictionary<string, string> sourcePathToCopyPath = new Dictionary<string, string>();
+            List<string> excludePaths = BuildExcludePaths("动画Timeline");
+
+            HashSet<AnimationClip> animationClips = new HashSet<AnimationClip>();
+            Dictionary<string, RuntimeAnimatorController> animatorControllers = new Dictionary<string, RuntimeAnimatorController>();
+            Dictionary<string, PlayableAsset> playableAssets = new Dictionary<string, PlayableAsset>();
+
+            var animators = instance.GetComponentsInChildren<Animator>(true);
+            var directors = instance.GetComponentsInChildren<PlayableDirector>(true);
+
+            EditorUtility.DisplayProgressBar("处理中", "正在收集动画与 Timeline 资源...", 0.2f);
+
+            try
+            {
+                foreach (Animator animator in animators)
+                {
+                    CollectAssetsFromAnimator(animator, animationClips, animatorControllers);
+                }
+
+                foreach (PlayableDirector director in directors)
+                {
+                    CollectAssetsFromPlayableDirector(director, animationClips, playableAssets);
+                }
+
+                EditorUtility.DisplayProgressBar("处理中", "正在复制动画片段...", 0.4f);
+                foreach (AnimationClip clip in animationClips)
+                {
+                    CopyAnimationClipIfNeeded(clip, animationCopyPath, copiedAssetIDs, excludePaths, guidMap, sourcePathToCopyPath);
+                }
+
+                EditorUtility.DisplayProgressBar("处理中", "正在复制 Timeline 资源...", 0.6f);
+                List<string> copiedPlayablePaths = new List<string>();
+                foreach (PlayableAsset playableAsset in playableAssets.Values)
+                {
+                    string copyPath = CopyMainAssetIfNeeded(playableAsset, animationCopyPath, copiedAssetIDs, excludePaths,
+                        guidMap, sourcePathToCopyPath, "动画Timeline");
+                    if (!string.IsNullOrEmpty(copyPath))
+                    {
+                        copiedPlayablePaths.Add(copyPath);
+                    }
+                }
+
+                EditorUtility.DisplayProgressBar("处理中", "正在复制 Animator Controller...", 0.75f);
+                List<string> copiedControllerPaths = new List<string>();
+                foreach (RuntimeAnimatorController controller in animatorControllers.Values)
+                {
+                    string copyPath = CopyMainAssetIfNeeded(controller, animationCopyPath, copiedAssetIDs, excludePaths,
+                        guidMap, sourcePathToCopyPath, "动画Timeline");
+                    if (!string.IsNullOrEmpty(copyPath))
+                    {
+                        copiedControllerPaths.Add(copyPath);
+                    }
+                }
+
+                List<string> copiedYamlPaths = new List<string>();
+                copiedYamlPaths.AddRange(copiedPlayablePaths);
+                copiedYamlPaths.AddRange(copiedControllerPaths);
+                foreach (string copiedYamlPath in copiedYamlPaths)
+                {
+                    ReplaceGuidReferencesInFile(copiedYamlPath, guidMap);
+                }
+
+                AssetDatabase.Refresh();
+                EditorUtility.DisplayProgressBar("处理中", "正在更新组件引用...", 0.95f);
+                foreach (Animator animator in animators)
+                {
+                    ReplaceAnimatorControllerReference(animator, sourcePathToCopyPath);
+                }
+
+                foreach (PlayableDirector director in directors)
+                {
+                    ReplacePlayableDirectorReference(director, sourcePathToCopyPath, instance);
+                }
+
+                AssetDatabase.Refresh();
+                Debug.Log($"[动画Timeline] 处理完成: Animator {animators.Length} 个, PlayableDirector {directors.Length} 个, " +
+                          $"Controller {animatorControllers.Count} 个, Timeline/Playable {playableAssets.Count} 个, " +
+                          $"复制资源 {copiedAssetIDs.Count} 个");
+            }
+            finally
+            {
+                EditorUtility.ClearProgressBar();
+            }
+        }
+
+        /// <summary>
+        /// 从 Animator 收集 Controller 及其引用的 AnimationClip（含 CollectDependencies 递归依赖）
+        /// </summary>
+        private void CollectAssetsFromAnimator(Animator animator, HashSet<AnimationClip> clips,
+            Dictionary<string, RuntimeAnimatorController> controllers)
+        {
+            if (animator == null) return;
+
+            RuntimeAnimatorController controller = animator.runtimeAnimatorController;
+            if (controller == null) return;
+
+            RegisterAnimatorController(controllers, controller);
+
+            if (controller is AnimatorOverrideController overrideController)
+            {
+                RegisterAnimatorController(controllers, overrideController.runtimeAnimatorController);
+            }
+
+            foreach (AnimationClip clip in controller.animationClips)
+            {
+                AddAnimationClip(clips, clip);
+            }
+
+            CollectDependenciesIntoSets(new Object[] { controller }, clips, controllers, null);
+        }
+
+        /// <summary>
+        /// 从 PlayableDirector 收集 Timeline 及其引用的 AnimationClip / 嵌套 PlayableAsset
+        /// </summary>
+        private void CollectAssetsFromPlayableDirector(PlayableDirector director, HashSet<AnimationClip> clips,
+            Dictionary<string, PlayableAsset> playableAssets)
+        {
+            if (director == null) return;
+
+            PlayableAsset playableAsset = director.playableAsset;
+            if (playableAsset == null) return;
+
+            RegisterPlayableAsset(playableAssets, playableAsset);
+
+            if (playableAsset is TimelineAsset timeline)
+            {
+                CollectAssetsFromTimelineTracks(timeline, clips, playableAssets);
+            }
+
+            CollectDependenciesIntoSets(new Object[] { playableAsset }, clips, null, playableAssets);
+        }
+
+        /// <summary>
+        /// 递归遍历 Timeline 全部轨道（含 GroupTrack 子轨道），收集 Clip 与 PlayableAsset
+        /// </summary>
+        private void CollectAssetsFromTimelineTracks(TimelineAsset timeline, HashSet<AnimationClip> clips,
+            Dictionary<string, PlayableAsset> playableAssets)
+        {
+            foreach (TrackAsset rootTrack in timeline.GetRootTracks())
+            {
+                CollectAssetsFromTrackRecursive(rootTrack, clips, playableAssets);
+            }
+        }
+
+        private void CollectAssetsFromTrackRecursive(TrackAsset track, HashSet<AnimationClip> clips,
+            Dictionary<string, PlayableAsset> playableAssets)
+        {
+            if (track == null) return;
+
+            if (track is AnimationTrack animationTrack && animationTrack.infiniteClip != null)
+            {
+                AddAnimationClip(clips, animationTrack.infiniteClip);
+            }
+
+            foreach (TimelineClip timelineClip in track.GetClips())
+            {
+                CollectAssetsFromTimelineClip(timelineClip, clips, playableAssets);
+            }
+
+            foreach (TrackAsset childTrack in track.GetChildTracks())
+            {
+                CollectAssetsFromTrackRecursive(childTrack, clips, playableAssets);
+            }
+        }
+
+        private void CollectAssetsFromTimelineClip(TimelineClip timelineClip, HashSet<AnimationClip> clips,
+            Dictionary<string, PlayableAsset> playableAssets)
+        {
+            if (timelineClip == null || timelineClip.asset == null) return;
+
+            if (timelineClip.asset is AnimationPlayableAsset animationPlayable && animationPlayable.clip != null)
+            {
+                AddAnimationClip(clips, animationPlayable.clip);
+            }
+
+            if (timelineClip.asset is PlayableAsset clipPlayableAsset)
+            {
+                RegisterPlayableAsset(playableAssets, clipPlayableAsset);
+                if (clipPlayableAsset is TimelineAsset nestedTimeline)
+                {
+                    CollectAssetsFromTimelineTracks(nestedTimeline, clips, playableAssets);
+                }
+            }
+
+            CollectDependenciesIntoSets(new Object[] { timelineClip.asset }, clips, null, playableAssets);
+        }
+
+        /// <summary>
+        /// 使用 EditorUtility.CollectDependencies 补充收集动画 / Controller / Playable 依赖
+        /// </summary>
+        private void CollectDependenciesIntoSets(Object[] roots, HashSet<AnimationClip> clips,
+            Dictionary<string, RuntimeAnimatorController> controllers, Dictionary<string, PlayableAsset> playableAssets)
+        {
+            Object[] dependencies = EditorUtility.CollectDependencies(roots);
+            foreach (Object dependency in dependencies)
+            {
+                if (dependency == null) continue;
+
+                if (dependency is AnimationClip clip)
+                {
+                    AddAnimationClip(clips, clip);
+                }
+                else if (dependency is RuntimeAnimatorController controller && controllers != null)
+                {
+                    RegisterAnimatorController(controllers, controller);
+                }
+                else if (dependency is PlayableAsset playableAsset && playableAssets != null)
+                {
+                    RegisterPlayableAsset(playableAssets, playableAsset);
+                }
+            }
+        }
+
+        private void RegisterAnimatorController(Dictionary<string, RuntimeAnimatorController> controllers,
+            RuntimeAnimatorController controller)
+        {
+            if (controller == null) return;
+
+            string path = AssetDatabase.GetAssetPath(controller);
+            if (string.IsNullOrEmpty(path)) return;
+
+            controllers[path] = controller;
+        }
+
+        private void RegisterPlayableAsset(Dictionary<string, PlayableAsset> playableAssets, PlayableAsset playableAsset)
+        {
+            if (playableAsset == null) return;
+
+            string path = AssetDatabase.GetAssetPath(playableAsset);
+            if (string.IsNullOrEmpty(path)) return;
+
+            playableAssets[path] = playableAsset;
+        }
+
+        /// <summary>
+        /// 过滤无效 / 预览用 AnimationClip 后加入集合
+        /// </summary>
+        private void AddAnimationClip(HashSet<AnimationClip> clips, AnimationClip clip)
+        {
+            if (clip == null) return;
+            if (clip.name.StartsWith("__preview__")) return;
+
+            string path = AssetDatabase.GetAssetPath(clip);
+            if (string.IsNullOrEmpty(path)) return;
+
+            clips.Add(clip);
+        }
+
+        /// <summary>
+        /// 复制单个 AnimationClip；若片段来自模型文件则复制整个模型（与网格复制逻辑一致）
+        /// </summary>
+        private void CopyAnimationClipIfNeeded(AnimationClip clip, string copyPath, List<string> copiedAssetIDs,
+            List<string> excludePaths, Dictionary<string, string> guidMap, Dictionary<string, string> sourcePathToCopyPath)
+        {
+            if (clip == null) return;
+
+            string assetPath = AssetDatabase.GetAssetPath(clip);
+            if (string.IsNullOrEmpty(assetPath)) return;
+
+            if (IsAssetPathExcluded(assetPath, excludePaths)) return;
+
+            Object assetToCopy = IsModelAssetPath(assetPath)
+                ? AssetDatabase.LoadMainAssetAtPath(assetPath)
+                : (Object)clip;
+
+            CopyMainAssetIfNeeded(assetToCopy, copyPath, copiedAssetIDs, excludePaths, guidMap, sourcePathToCopyPath, "动画Timeline");
+        }
+
+        /// <summary>
+        /// 通用：复制主资源到目标目录（GUID 去重），并记录路径 / GUID 映射
+        /// </summary>
+        private string CopyMainAssetIfNeeded(Object sourceAsset, string copyPath, List<string> copiedAssetIDs,
+            List<string> excludePaths, Dictionary<string, string> guidMap, Dictionary<string, string> sourcePathToCopyPath,
+            string logTag)
+        {
+            if (sourceAsset == null) return null;
+
+            string assetPath = AssetDatabase.GetAssetPath(sourceAsset);
+            if (string.IsNullOrEmpty(assetPath)) return null;
+
+            if (IsAssetPathExcluded(assetPath, excludePaths)) return null;
+
+            string id = AssetDatabase.AssetPathToGUID(assetPath);
+            string copyFilePath = GenerateCopyPathFromAssetPath(assetPath, copyPath);
+
+            if (copiedAssetIDs.Contains(id))
+            {
+                if (sourcePathToCopyPath.TryGetValue(assetPath, out string existingCopyPath))
+                {
+                    return existingCopyPath;
+                }
+
+                if (!string.IsNullOrEmpty(copyFilePath) && File.Exists(GetFullAssetPath(copyFilePath)))
+                {
+                    sourcePathToCopyPath[assetPath] = copyFilePath;
+                    return copyFilePath;
+                }
+
+                return null;
+            }
+
+            copiedAssetIDs.Add(id);
+            copyFilePath = CopyAssetAtPath(assetPath, copyPath);
+            AssetDatabase.Refresh();
+
+            if (string.IsNullOrEmpty(copyFilePath)) return null;
+
+            sourcePathToCopyPath[assetPath] = copyFilePath;
+
+            string newId = AssetDatabase.AssetPathToGUID(copyFilePath);
+            if (!string.IsNullOrEmpty(newId))
+            {
+                guidMap[id] = newId;
+            }
+
+            Debug.Log($"[{logTag}] 已复制资源: {Path.GetFileName(assetPath)} -> {copyFilePath}");
+            return copyFilePath;
+        }
+
+        /// <summary>
+        /// 按源文件路径复制资源（统一使用源文件名生成副本，避免 FBX 子资源命名不一致）
+        /// </summary>
+        private string CopyAssetAtPath(string assetPath, string parentFolder)
+        {
+            if (string.IsNullOrEmpty(assetPath)) return null;
+
+            string targetPath = GenerateCopyPathFromAssetPath(assetPath, parentFolder);
+            if (string.IsNullOrEmpty(targetPath)) return null;
+
+            string fullPath = GetFullAssetPath(targetPath);
+            if (File.Exists(fullPath))
+            {
+                Debug.Log($"[资源复制] 文件已存在，跳过: {targetPath}");
+                return targetPath;
+            }
+
+            bool success = AssetDatabase.CopyAsset(assetPath, targetPath);
+            if (success)
+            {
+                Debug.Log($"[资源复制] 复制成功: {targetPath}");
+                return targetPath;
+            }
+
+            Debug.LogError($"[资源复制] 复制失败: {assetPath} -> {targetPath}");
+            return null;
+        }
+
+        /// <summary>
+        /// 替换资源 YAML 文件中的 GUID 引用（按 GUID 长度降序，避免部分匹配；每行替换全部命中项）
+        /// </summary>
+        private void ReplaceGuidReferencesInFile(string assetPath, Dictionary<string, string> guidMap)
+        {
+            if (string.IsNullOrEmpty(assetPath) || guidMap == null || guidMap.Count == 0) return;
+
+            string fullPath = GetFullAssetPath(assetPath);
+            if (!File.Exists(fullPath)) return;
+
+            KeyValuePair<string, string>[] sortedPairs = guidMap
+                .OrderByDescending(pair => pair.Key.Length)
+                .ToArray();
+
+            string[] content = File.ReadAllLines(fullPath);
+            List<string> replaceContent = new List<string>(content.Length);
+
+            foreach (string line in content)
+            {
+                string current = line;
+                foreach (KeyValuePair<string, string> pair in sortedPairs)
+                {
+                    if (current.Contains(pair.Key))
+                    {
+                        current = current.Replace(pair.Key, pair.Value);
+                    }
+                }
+                replaceContent.Add(current);
+            }
+
+            File.WriteAllLines(fullPath, replaceContent);
+        }
+
+        /// <summary>
+        /// 将 Animator 的 Controller 引用更新为复制后的资源（支持 FBX 内嵌 Controller 子资源）
+        /// </summary>
+        private void ReplaceAnimatorControllerReference(Animator animator, Dictionary<string, string> sourcePathToCopyPath)
+        {
+            if (animator == null || animator.runtimeAnimatorController == null) return;
+
+            RuntimeAnimatorController sourceController = animator.runtimeAnimatorController;
+            string sourcePath = AssetDatabase.GetAssetPath(sourceController);
+            if (string.IsNullOrEmpty(sourcePath)) return;
+
+            if (!sourcePathToCopyPath.TryGetValue(sourcePath, out string copiedPath))
+            {
+                Debug.LogWarning($"[动画Timeline] Controller 未复制，保持原引用: {sourcePath}");
+                return;
+            }
+
+            RuntimeAnimatorController copiedController =
+                LoadMatchingAssetFromCopy(sourceController, copiedPath) as RuntimeAnimatorController;
+
+            if (copiedController != null)
+            {
+                animator.runtimeAnimatorController = copiedController;
+                Debug.Log($"[动画Timeline] Animator 引用已更新: {animator.name} -> {copiedPath}");
+            }
+            else
+            {
+                Debug.LogWarning($"[动画Timeline] 未找到 Controller 副本: {copiedPath}");
+            }
+        }
+
+        /// <summary>
+        /// Timeline 轨道绑定快照（按轨道层级键保存，用于 Timeline 复制后恢复绑定）
+        /// </summary>
+        private struct TimelineBindingSnapshot
+        {
+            public string TrackKey;
+            public string BoundObjectPath;
+            public Object Binding;
+        }
+
+        /// <summary>
+        /// 将 PlayableDirector 的 Timeline 引用更新为复制后的资源，并恢复轨道 / ExposedReference 绑定
+        /// </summary>
+        private void ReplacePlayableDirectorReference(PlayableDirector director, Dictionary<string, string> sourcePathToCopyPath,
+            GameObject prefabInstanceRoot)
+        {
+            if (director == null || director.playableAsset == null) return;
+
+            PlayableAsset sourceAsset = director.playableAsset;
+            string sourcePath = AssetDatabase.GetAssetPath(sourceAsset);
+            if (string.IsNullOrEmpty(sourcePath)) return;
+
+            if (!sourcePathToCopyPath.TryGetValue(sourcePath, out string copiedPath))
+            {
+                Debug.LogWarning($"[动画Timeline] Timeline 未复制，保持原引用: {sourcePath}");
+                return;
+            }
+
+            PlayableAsset copiedAsset = LoadMatchingAssetFromCopy(sourceAsset, copiedPath) as PlayableAsset;
+            if (copiedAsset == null)
+            {
+                Debug.LogWarning($"[动画Timeline] 未找到 Timeline 副本: {copiedPath}");
+                return;
+            }
+
+            GameObject bindingRoot = PrefabUtility.GetOutermostPrefabInstanceRoot(director.gameObject);
+            if (bindingRoot == null)
+            {
+                bindingRoot = prefabInstanceRoot != null ? prefabInstanceRoot : director.gameObject;
+            }
+
+            List<TimelineBindingSnapshot> bindingSnapshots = CaptureTimelineBindings(director, bindingRoot);
+            Dictionary<string, Object> exposedReferences = CaptureExposedReferences(director);
+            TimelineAsset oldTimeline = sourceAsset as TimelineAsset;
+
+            director.playableAsset = copiedAsset;
+
+            if (oldTimeline != null && copiedAsset is TimelineAsset newTimeline)
+            {
+                RestoreTimelineBindings(director, newTimeline, bindingSnapshots, bindingRoot);
+            }
+
+            RestoreExposedReferences(director, exposedReferences);
+            director.RebuildGraph();
+            EditorUtility.SetDirty(director);
+            PrefabUtility.RecordPrefabInstancePropertyModifications(director);
+
+            Debug.Log($"[动画Timeline] PlayableDirector 引用已更新: {director.name} -> {copiedPath}, " +
+                      $"恢复绑定 {bindingSnapshots.Count} 项, ExposedReference {exposedReferences.Count} 项");
+        }
+
+        /// <summary>
+        /// 捕获 PlayableDirector 当前 Timeline 的全部轨道绑定
+        /// </summary>
+        private List<TimelineBindingSnapshot> CaptureTimelineBindings(PlayableDirector director, GameObject bindingRoot)
+        {
+            List<TimelineBindingSnapshot> snapshots = new List<TimelineBindingSnapshot>();
+            if (director == null || director.playableAsset == null) return snapshots;
+
+            if (director.playableAsset is TimelineAsset timeline)
+            {
+                foreach (TrackAsset track in EnumerateAllTimelineTracks(timeline))
+                {
+                    Object binding = director.GetGenericBinding(track);
+                    if (binding == null) continue;
+
+                    snapshots.Add(new TimelineBindingSnapshot
+                    {
+                        TrackKey = GetTimelineTrackBindingKey(track),
+                        BoundObjectPath = GetTransformPathFromRoot(GetBindingTransform(binding), bindingRoot.transform),
+                        Binding = binding
+                    });
+                }
+
+                return snapshots;
+            }
+
+            foreach (PlayableBinding output in director.playableAsset.outputs)
+            {
+                Object binding = director.GetGenericBinding(output.sourceObject);
+                if (binding == null) continue;
+
+                snapshots.Add(new TimelineBindingSnapshot
+                {
+                    TrackKey = output.sourceObject != null ? output.sourceObject.name : output.streamName,
+                    BoundObjectPath = GetTransformPathFromRoot(GetBindingTransform(binding), bindingRoot.transform),
+                    Binding = binding
+                });
+            }
+
+            return snapshots;
+        }
+
+        /// <summary>
+        /// 将捕获的绑定恢复到复制后的 Timeline 轨道上（优先按轨道键匹配，失败则按节点路径兜底）
+        /// </summary>
+        private void RestoreTimelineBindings(PlayableDirector director, TimelineAsset newTimeline,
+            List<TimelineBindingSnapshot> snapshots, GameObject bindingRoot)
+        {
+            if (director == null || newTimeline == null || snapshots == null || snapshots.Count == 0) return;
+
+            Dictionary<string, TrackAsset> trackMap = BuildTimelineTrackBindingMap(newTimeline);
+            Transform rootTransform = bindingRoot != null ? bindingRoot.transform : director.transform;
+            int restoredCount = 0;
+
+            foreach (TimelineBindingSnapshot snapshot in snapshots)
+            {
+                if (snapshot.Binding == null) continue;
+
+                TrackAsset targetTrack = null;
+                if (!string.IsNullOrEmpty(snapshot.TrackKey))
+                {
+                    trackMap.TryGetValue(snapshot.TrackKey, out targetTrack);
+                }
+
+                if (targetTrack == null && !string.IsNullOrEmpty(snapshot.TrackKey))
+                {
+                    targetTrack = FindTrackByBindingKeyFallback(newTimeline, snapshot.TrackKey);
+                }
+
+                if (targetTrack == null)
+                {
+                    Debug.LogWarning($"[动画Timeline] 未能匹配轨道绑定: trackKey={snapshot.TrackKey}, objectPath={snapshot.BoundObjectPath}");
+                    continue;
+                }
+
+                Object resolvedBinding = ResolveBindingOnInstance(snapshot.Binding, rootTransform);
+                if (resolvedBinding == null)
+                {
+                    Debug.LogWarning($"[动画Timeline] 绑定对象在预制体中未找到: {snapshot.BoundObjectPath}");
+                    continue;
+                }
+
+                director.SetGenericBinding(targetTrack, resolvedBinding);
+                restoredCount++;
+            }
+
+            Debug.Log($"[动画Timeline] 轨道绑定恢复 {restoredCount}/{snapshots.Count}");
+        }
+
+        /// <summary>
+        /// 捕获 PlayableDirector 上的 ExposedReference 绑定（ControlTrack 等 clip 内场景引用）
+        /// </summary>
+        private Dictionary<string, Object> CaptureExposedReferences(PlayableDirector director)
+        {
+            Dictionary<string, Object> exposedReferences = new Dictionary<string, Object>();
+            if (director == null) return exposedReferences;
+
+            SerializedObject serializedDirector = new SerializedObject(director);
+            SerializedProperty references = serializedDirector.FindProperty("m_ExposedReferences.m_References");
+            if (references == null || !references.isArray) return exposedReferences;
+
+            for (int i = 0; i < references.arraySize; i++)
+            {
+                SerializedProperty element = references.GetArrayElementAtIndex(i);
+                SerializedProperty nameProperty = element.FindPropertyRelative("exposedName");
+                SerializedProperty valueProperty = element.FindPropertyRelative("exposedValue");
+                if (nameProperty == null || valueProperty == null) continue;
+
+                string exposedName = nameProperty.stringValue;
+                Object exposedValue = valueProperty.objectReferenceValue;
+                if (string.IsNullOrEmpty(exposedName) || exposedValue == null) continue;
+
+                exposedReferences[exposedName] = exposedValue;
+            }
+
+            return exposedReferences;
+        }
+
+        /// <summary>
+        /// 恢复 PlayableDirector 上的 ExposedReference 绑定
+        /// </summary>
+        private void RestoreExposedReferences(PlayableDirector director, Dictionary<string, Object> exposedReferences)
+        {
+            if (director == null || exposedReferences == null || exposedReferences.Count == 0) return;
+
+            Transform rootTransform = director.transform;
+            GameObject prefabRoot = PrefabUtility.GetOutermostPrefabInstanceRoot(director.gameObject);
+            if (prefabRoot != null)
+            {
+                rootTransform = prefabRoot.transform;
+            }
+
+            foreach (KeyValuePair<string, Object> pair in exposedReferences)
+            {
+                Object resolved = ResolveBindingOnInstance(pair.Value, rootTransform);
+                if (resolved == null)
+                {
+                    resolved = pair.Value;
+                }
+
+                director.SetReferenceValue(new PropertyName(pair.Key), resolved);
+            }
+        }
+
+        /// <summary>
+        /// 构建 Timeline 轨道绑定键 -> 轨道 的映射表
+        /// </summary>
+        private Dictionary<string, TrackAsset> BuildTimelineTrackBindingMap(TimelineAsset timeline)
+        {
+            Dictionary<string, TrackAsset> trackMap = new Dictionary<string, TrackAsset>();
+            foreach (TrackAsset track in EnumerateAllTimelineTracks(timeline))
+            {
+                string key = GetTimelineTrackBindingKey(track);
+                if (string.IsNullOrEmpty(key) || trackMap.ContainsKey(key)) continue;
+                trackMap.Add(key, track);
+            }
+
+            return trackMap;
+        }
+
+        /// <summary>
+        /// 递归枚举 Timeline 中的全部轨道（含 GroupTrack 子轨道）
+        /// </summary>
+        private IEnumerable<TrackAsset> EnumerateAllTimelineTracks(TimelineAsset timeline)
+        {
+            if (timeline == null) yield break;
+
+            foreach (TrackAsset rootTrack in timeline.GetRootTracks())
+            {
+                foreach (TrackAsset track in EnumerateTrackHierarchy(rootTrack))
+                {
+                    yield return track;
+                }
+            }
+        }
+
+        private IEnumerable<TrackAsset> EnumerateTrackHierarchy(TrackAsset track)
+        {
+            if (track == null) yield break;
+
+            yield return track;
+            foreach (TrackAsset childTrack in track.GetChildTracks())
+            {
+                foreach (TrackAsset child in EnumerateTrackHierarchy(childTrack))
+                {
+                    yield return child;
+                }
+            }
+        }
+
+        /// <summary>
+        /// 生成 Timeline 轨道唯一绑定键：轨道类型 + 层级路径 + 同级同名序号
+        /// </summary>
+        private string GetTimelineTrackBindingKey(TrackAsset track)
+        {
+            if (track == null) return string.Empty;
+
+            List<string> segments = new List<string>();
+            TrackAsset current = track;
+            while (current != null)
+            {
+                segments.Insert(0, FormatTimelineTrackSegment(current));
+                current = current.parent as TrackAsset;
+            }
+
+            return track.GetType().Name + "::" + string.Join("/", segments);
+        }
+
+        private string FormatTimelineTrackSegment(TrackAsset track)
+        {
+            IEnumerable<TrackAsset> siblings;
+            if (track.parent is TrackAsset parentTrack)
+            {
+                siblings = parentTrack.GetChildTracks();
+            }
+            else
+            {
+                siblings = track.timelineAsset.GetRootTracks();
+            }
+
+            int index = 0;
+            foreach (TrackAsset sibling in siblings)
+            {
+                if (sibling == track) break;
+                if (sibling.GetType() == track.GetType() && sibling.name == track.name)
+                {
+                    index++;
+                }
+            }
+
+            return track.name + "#" + index;
+        }
+
+        /// <summary>
+        /// 绑定键精确匹配失败时，按轨道类型 + 层级路径后缀兜底查找
+        /// </summary>
+        private TrackAsset FindTrackByBindingKeyFallback(TimelineAsset timeline, string trackKey)
+        {
+            if (timeline == null || string.IsNullOrEmpty(trackKey)) return null;
+
+            int splitIndex = trackKey.IndexOf("::", System.StringComparison.Ordinal);
+            if (splitIndex <= 0) return null;
+
+            string trackTypeName = trackKey.Substring(0, splitIndex);
+            string trackPath = trackKey.Substring(splitIndex + 2);
+
+            foreach (TrackAsset track in EnumerateAllTimelineTracks(timeline))
+            {
+                if (track.GetType().Name != trackTypeName) continue;
+
+                string candidateKey = GetTimelineTrackBindingKey(track);
+                int candidateSplit = candidateKey.IndexOf("::", System.StringComparison.Ordinal);
+                if (candidateSplit <= 0) continue;
+
+                if (candidateKey.Substring(candidateSplit + 2) == trackPath)
+                {
+                    return track;
+                }
+            }
+
+            return null;
+        }
+        private Object ResolveBindingOnInstance(Object binding, Transform rootTransform)
+        {
+            if (binding == null || rootTransform == null) return binding;
+
+            Transform sourceTransform = GetBindingTransform(binding);
+            if (sourceTransform == null) return binding;
+
+            string relativePath = GetTransformPathFromRoot(sourceTransform, rootTransform);
+            if (string.IsNullOrEmpty(relativePath))
+            {
+                return binding;
+            }
+
+            Transform targetTransform = rootTransform;
+            if (!string.IsNullOrEmpty(relativePath))
+            {
+                targetTransform = rootTransform.Find(relativePath);
+                if (targetTransform == null)
+                {
+                    targetTransform = FindTransformByRelativePath(rootTransform, relativePath);
+                }
+            }
+
+            if (targetTransform == null)
+            {
+                return null;
+            }
+
+            if (binding is GameObject)
+            {
+                return targetTransform.gameObject;
+            }
+
+            if (binding is Component sourceComponent)
+            {
+                Component targetComponent = targetTransform.GetComponent(sourceComponent.GetType());
+                return targetComponent != null ? targetComponent : binding;
+            }
+
+            return binding;
+        }
+
+        private Transform GetBindingTransform(Object binding)
+        {
+            if (binding == null) return null;
+
+            if (binding is GameObject gameObject)
+            {
+                return gameObject.transform;
+            }
+
+            if (binding is Component component)
+            {
+                return component.transform;
+            }
+
+            return null;
+        }
+
+        /// <summary>
+        /// 获取 target 相对 root 的层级路径（root 本身返回空字符串）
+        /// </summary>
+        private string GetTransformPathFromRoot(Transform target, Transform root)
+        {
+            if (target == null || root == null) return string.Empty;
+            if (target == root) return string.Empty;
+
+            List<string> segments = new List<string>();
+            Transform current = target;
+            while (current != null && current != root)
+            {
+                segments.Insert(0, current.name);
+                current = current.parent;
+            }
+
+            if (current != root) return string.Empty;
+            return string.Join("/", segments);
+        }
+
+        /// <summary>
+        /// Transform.Find 失败时，按相对路径分段逐级查找节点
+        /// </summary>
+        private Transform FindTransformByRelativePath(Transform root, string relativePath)
+        {
+            if (root == null || string.IsNullOrEmpty(relativePath)) return root;
+
+            string[] parts = relativePath.Split('/');
+            Transform current = root;
+            foreach (string part in parts)
+            {
+                if (current == null) return null;
+
+                Transform next = current.Find(part);
+                if (next == null)
+                {
+                    next = FindDirectChildByName(current, part);
+                }
+
+                current = next;
+            }
+
+            return current;
+        }
+
+        private Transform FindDirectChildByName(Transform parent, string childName)
+        {
+            for (int i = 0; i < parent.childCount; i++)
+            {
+                Transform child = parent.GetChild(i);
+                if (child.name == childName)
+                {
+                    return child;
+                }
+            }
+
+            return null;
+        }
+
+        /// <summary>
+        /// 从复制后的资源文件中加载与源对象匹配的子资源（兼容 .fbx / .asset 内嵌资源）
+        /// </summary>
+        private Object LoadMatchingAssetFromCopy(Object sourceAsset, string copiedAssetPath)
+        {
+            if (sourceAsset == null || string.IsNullOrEmpty(copiedAssetPath)) return null;
+
+            Object copiedMainAsset = AssetDatabase.LoadMainAssetAtPath(copiedAssetPath);
+            if (copiedMainAsset != null
+                && copiedMainAsset.GetType() == sourceAsset.GetType()
+                && copiedMainAsset.name == sourceAsset.name)
+            {
+                return copiedMainAsset;
+            }
+
+            Object[] copiedSubAssets = AssetDatabase.LoadAllAssetsAtPath(copiedAssetPath);
+            foreach (Object copiedSubAsset in copiedSubAssets)
+            {
+                if (copiedSubAsset == null) continue;
+                if (copiedSubAsset.GetType() != sourceAsset.GetType()) continue;
+                if (copiedSubAsset.name != sourceAsset.name) continue;
+
+                return copiedSubAsset;
+            }
+
+            return copiedMainAsset;
+        }
+
+        /// <summary>
+        /// 基于源资源路径生成副本路径（使用源文件名，确保同一文件的所有子资源指向同一副本）
+        /// </summary>
+        private string GenerateCopyPathFromAssetPath(string assetPath, string parentFolder)
+        {
+            if (string.IsNullOrEmpty(assetPath)) return null;
+
+            string fileName = Path.GetFileNameWithoutExtension(assetPath);
+            string extension = Path.GetExtension(assetPath);
+            return parentFolder + "/" + fileName + "_Copy" + extension;
+        }
+
+        /// <summary>
+        /// 判断资源路径是否位于排除目录中
+        /// </summary>
+        private bool IsAssetPathExcluded(string assetPath, List<string> excludePaths)
+        {
+            foreach (string excludePath in excludePaths)
+            {
+                if (assetPath.StartsWith(excludePath))
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// 判断资源路径是否为模型文件（.fbx / .obj 等）
+        /// </summary>
+        private bool IsModelAssetPath(string assetPath)
+        {
+            return AssetImporter.GetAtPath(assetPath) is ModelImporter;
+        }
+
+        /// <summary>
+        /// 将 Assets 相对路径转换为系统绝对路径
+        /// </summary>
+        private string GetFullAssetPath(string assetPath)
+        {
+            return Application.dataPath.Substring(0, Application.dataPath.Length - "Assets".Length) + assetPath;
+        }
+
+        #endregion
         
         #region 资源复制工具方法
         
@@ -910,8 +2077,8 @@ namespace ToolSet
                 return null;
             }
 
-            // 生成格式：目标目录/资源名_Copy.扩展名
-            string copyPath = parentFolder + "/" + asset.name + "_Copy" + Path.GetExtension(assetPath);
+            // 生成格式：目标目录/源文件名_Copy.扩展名（使用源文件路径，避免 FBX 子资源命名不一致）
+            string copyPath = GenerateCopyPathFromAssetPath(assetPath, parentFolder);
             return copyPath;
         }
         
