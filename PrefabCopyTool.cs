@@ -730,17 +730,7 @@ namespace ToolSet
                     {
                         GameObject srcObj = PrefabUtility.GetCorrespondingObjectFromSource(child.gameObject);
                         string path = AssetDatabase.GetAssetPath(srcObj);
-                        bool isExcluded = false;
-                        foreach (string excludePath in excludePaths)
-                        {
-                            if (path.StartsWith(excludePath))
-                            {
-                                isExcluded = true;
-                                break;
-                            }
-                        }
-                        
-                        if (isExcluded)
+                        if (IsAssetPathExcluded(path, excludePaths))
                         {
                             continue; // 跳过排除目录
                         }
@@ -1316,12 +1306,9 @@ namespace ToolSet
             }
 
             // 排除目录检查
-            foreach (string excludePath in excludePaths)
+            if (IsAssetPathExcluded(path, excludePaths))
             {
-                if (path.StartsWith(excludePath))
-                {
-                    return sourceMat;
-                }
+                return sourceMat;
             }
 
             string id = AssetDatabase.AssetPathToGUID(path);
@@ -1553,17 +1540,7 @@ namespace ToolSet
     
                     if (string.IsNullOrEmpty(meshPath))
                         continue;
-                    bool isExcluded = false;
-                    foreach (string excludePath in excludePaths)
-                    {
-                        if (meshPath.StartsWith(excludePath))
-                        {
-                            isExcluded = true;
-                            break;
-                        }
-                    }
-                    
-                    if (isExcluded)
+                    if (IsAssetPathExcluded(meshPath, excludePaths))
                     {
                         continue; // 跳过排除目录中的网格
                     }
@@ -1645,16 +1622,10 @@ namespace ToolSet
                     if (string.IsNullOrEmpty(meshPath)) continue; // 运行时生成的 mesh
 
                     // 排除目录检查
-                    bool isExcluded = false;
-                    foreach (string excludePath in excludePaths)
+                    if (IsAssetPathExcluded(meshPath, excludePaths))
                     {
-                        if (meshPath.StartsWith(excludePath))
-                        {
-                            isExcluded = true;
-                            break;
-                        }
+                        continue;
                     }
-                    if (isExcluded) continue;
 
                     string id = AssetDatabase.AssetPathToGUID(meshPath);
                     string copyFilePath;
@@ -2680,14 +2651,39 @@ namespace ToolSet
         /// </summary>
         private bool IsAssetPathExcluded(string assetPath, List<string> excludePaths)
         {
+            if (string.IsNullOrEmpty(assetPath) || excludePaths == null || excludePaths.Count == 0)
+            {
+                return false;
+            }
+
             foreach (string excludePath in excludePaths)
             {
-                if (assetPath.StartsWith(excludePath))
+                if (IsPathInFolderOrSubFolder(assetPath, excludePath))
                 {
                     return true;
                 }
             }
             return false;
+        }
+
+        /// <summary>
+        /// 判断资源路径是否为指定目录本身或其子目录内容（严格目录边界匹配）
+        /// </summary>
+        private bool IsPathInFolderOrSubFolder(string assetPath, string folderPath)
+        {
+            if (string.IsNullOrEmpty(assetPath) || string.IsNullOrEmpty(folderPath))
+            {
+                return false;
+            }
+
+            string normalizedAssetPath = assetPath.Replace("\\", "/").TrimEnd('/');
+            string normalizedFolderPath = folderPath.Replace("\\", "/").TrimEnd('/');
+            if (normalizedAssetPath == normalizedFolderPath)
+            {
+                return true;
+            }
+
+            return normalizedAssetPath.StartsWith(normalizedFolderPath + "/");
         }
 
         /// <summary>
