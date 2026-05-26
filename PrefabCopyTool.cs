@@ -877,15 +877,16 @@ namespace ToolSet
             // 获取所有网格渲染器（包括普通网格和蒙皮网格）
             var meshRenderers = instance.GetComponentsInChildren<MeshRenderer>(true);
             var skinnedMeshRenderers = instance.GetComponentsInChildren<SkinnedMeshRenderer>(true);
-            List<string> sourceMatIDs = new List<string>();
+            HashSet<string> sourceMatIDs = new HashSet<string>();
+            Dictionary<string, Material> copiedMatCache = new Dictionary<string, Material>();
             List<string> excludePaths = BuildExcludePaths("材质复制");
             
             EditorUtility.DisplayProgressBar("处理中", "正在复制材质...", 0.3f);
     
             try
             {
-                CopyMaterialFromRenderer(meshRenderers, materialsCopyPath, sourceMatIDs, excludePaths, "材质复制");
-                CopyMaterialFromRenderer(skinnedMeshRenderers, materialsCopyPath, sourceMatIDs, excludePaths, "材质复制");
+                CopyMaterialFromRenderer(meshRenderers, materialsCopyPath, sourceMatIDs, copiedMatCache, excludePaths, "材质复制");
+                CopyMaterialFromRenderer(skinnedMeshRenderers, materialsCopyPath, sourceMatIDs, copiedMatCache, excludePaths, "材质复制");
                 AssetDatabase.Refresh();
     
                 //应用预制体中的修改
@@ -910,13 +911,14 @@ namespace ToolSet
         /// <param name="sourceMatIDs">已复制材质GUID（跨调用共享）</param>
         /// <param name="excludePaths">排除目录路径</param>
         /// <param name="logTag">日志标签</param>
-        private void CopyMaterialFromRenderer(Renderer[] renderers, string copyPath, List<string> sourceMatIDs, List<string> excludePaths, string logTag)
+        private void CopyMaterialFromRenderer(Renderer[] renderers, string copyPath, HashSet<string> sourceMatIDs,
+            Dictionary<string, Material> copiedMatCache, List<string> excludePaths, string logTag)
         {
             foreach (var render in renderers)
             {
                 if (render == null) continue;
 
-                CopyAndReplaceRendererMaterials(render, copyPath, sourceMatIDs, excludePaths, logTag);
+                CopyAndReplaceRendererMaterials(render, copyPath, sourceMatIDs, copiedMatCache, excludePaths, logTag);
             }
         }
 
@@ -931,7 +933,8 @@ namespace ToolSet
                 return "Image/Text资源复制失败：目标实例为空";
             }
 
-            List<string> sourceMatIDs = new List<string>();
+            HashSet<string> sourceMatIDs = new HashSet<string>();
+            Dictionary<string, Material> copiedMatCache = new Dictionary<string, Material>();
             List<string> excludePaths = BuildExcludePaths("ImageText资源");
             string targetCopyPath = !string.IsNullOrEmpty(imageTextCopyPath) ? imageTextCopyPath : materialsCopyPath;
 
@@ -944,7 +947,7 @@ namespace ToolSet
             EditorUtility.DisplayProgressBar("处理中", "正在复制Image/Text资源...", 0.45f);
             try
             {
-                bool hasTargets = CopyImageAndTextMaterialsAndAssets(instance, targetCopyPath, sourceMatIDs, excludePaths);
+                bool hasTargets = CopyImageAndTextMaterialsAndAssets(instance, targetCopyPath, sourceMatIDs, copiedMatCache, excludePaths);
                 if (!hasTargets)
                 {
                     Debug.LogWarning($"[ImageText资源] 未在预制体中检测到 Image/Text 组件: {instance.name}");
@@ -969,7 +972,8 @@ namespace ToolSet
         /// 1. Image.material / Image.sprite / Image.overrideSprite
         /// 2. Text.material / Text.font（字体文件）及其字体材质
         /// </summary>
-        private bool CopyImageAndTextMaterialsAndAssets(GameObject instance, string copyPath, List<string> sourceMatIDs, List<string> excludePaths)
+        private bool CopyImageAndTextMaterialsAndAssets(GameObject instance, string copyPath, HashSet<string> sourceMatIDs,
+            Dictionary<string, Material> copiedMatCache, List<string> excludePaths)
         {
             if (instance == null) return false;
 
@@ -991,7 +995,7 @@ namespace ToolSet
                 Sprite sourceOverrideSprite = image.overrideSprite;
 
                 Material copiedImageMaterial = CopySingleMaterialIfNeeded(
-                    image.material, copyPath, sourceMatIDs, excludePaths, "Image材质");
+                    image.material, copyPath, sourceMatIDs, copiedMatCache, excludePaths, "Image材质");
                 if (copiedImageMaterial != null && copiedImageMaterial != image.material)
                 {
                     image.material = copiedImageMaterial;
@@ -1024,7 +1028,7 @@ namespace ToolSet
 
                 Material originalTextMaterial = text.material;
                 Material copiedTextMaterial = CopySingleMaterialIfNeeded(
-                    originalTextMaterial, copyPath, sourceMatIDs, excludePaths, "Text材质");
+                    originalTextMaterial, copyPath, sourceMatIDs, copiedMatCache, excludePaths, "Text材质");
                 if (copiedTextMaterial != null && copiedTextMaterial != originalTextMaterial)
                 {
                     text.material = copiedTextMaterial;
@@ -1047,6 +1051,7 @@ namespace ToolSet
                     copiedFont != null ? copiedFont.material : sourceFontMaterial,
                     copyPath,
                     sourceMatIDs,
+                    copiedMatCache,
                     excludePaths,
                     "Text字体材质");
 
@@ -1083,13 +1088,18 @@ namespace ToolSet
             }
 
             List<string> excludePaths = BuildExcludePaths("材质贴图");
-            string[] materialGuids = AssetDatabase.FindAssets("t:Material", new[] { sourceMaterialsPath });
-            if (materialGuids == null || materialGuids.Length == 0)
+            List<string> materialPaths = ResolveMaterialPathsForTextureCopy(sourceMaterialsPath);
+            if (materialPaths.Count == 0)
             {
                 return "材质贴图处理完成：未检测到材质资源";
             }
 
             Dictionary<string, string> textureGuidToCopiedPath = new Dictionary<string, string>();
+            Dictionary<string, Texture> copiedTextureCache = new Dictionary<string, Texture>();
+            List<TextureCopyTask> textureCopyTasks = new List<TextureCopyTask>();
+            HashSet<string> occupiedTexturePaths = new HashSet<string>();
+            Dictionary<string, string> occupiedPathToGuid = new Dictionary<string, string>();
+            Dictionary<string, int> fileNameNextIndex = new Dictionary<string, int>();
             int copiedTextureCount = 0;
             int updatedMaterialCount = 0;
             int skippedTextureCount = 0;
@@ -1097,9 +1107,29 @@ namespace ToolSet
 
             try
             {
-                for (int i = 0; i < materialGuids.Length; i++)
+                string targetTexturesFullPath = GetFullAssetPath(targetTexturesPath);
+                if (Directory.Exists(targetTexturesFullPath))
                 {
-                    string materialPath = AssetDatabase.GUIDToAssetPath(materialGuids[i]);
+                    string[] existingFiles = Directory.GetFiles(targetTexturesFullPath, "*", SearchOption.TopDirectoryOnly);
+                    foreach (string existingFile in existingFiles)
+                    {
+                        if (existingFile.EndsWith(".meta")) continue;
+                        string fileName = Path.GetFileName(existingFile);
+                        string assetPath = $"{targetTexturesPath}/{fileName}".Replace("\\", "/");
+                        occupiedTexturePaths.Add(assetPath);
+
+                        string existingGuid = AssetDatabase.AssetPathToGUID(assetPath);
+                        if (!string.IsNullOrEmpty(existingGuid))
+                        {
+                            occupiedPathToGuid[assetPath] = existingGuid;
+                        }
+                    }
+                }
+
+                // 阶段1：扫描材质，收集需要复制的贴图任务与GUID映射
+                for (int i = 0; i < materialPaths.Count; i++)
+                {
+                    string materialPath = materialPaths[i];
                     if (string.IsNullOrEmpty(materialPath) || IsAssetPathExcluded(materialPath, excludePaths))
                     {
                         continue;
@@ -1111,20 +1141,65 @@ namespace ToolSet
                         continue;
                     }
 
-                    EditorUtility.DisplayProgressBar(
-                        "处理中",
-                        $"正在处理材质贴图: {material.name}",
-                        (float)i / materialGuids.Length);
+                    if (i == 0 || i == materialPaths.Count - 1 || i % 10 == 0)
+                    {
+                        EditorUtility.DisplayProgressBar(
+                            "处理中",
+                            $"[阶段1/3] 分析材质贴图: {material.name}",
+                            materialPaths.Count <= 1 ? 0f : (float)i / (materialPaths.Count - 1));
+                    }
 
-                    bool materialUpdated = RelinkMaterialTexturesToCopiedAssets(
+                    CollectTextureCopyTasksFromMaterial(
                         material,
                         targetTexturesPath,
                         excludePaths,
                         textureGuidToCopiedPath,
-                        ref copiedTextureCount,
+                        textureCopyTasks,
+                        occupiedTexturePaths,
+                        occupiedPathToGuid,
+                        fileNameNextIndex,
                         ref skippedTextureCount,
                         ref failedTextureCount);
+                }
 
+                // 阶段2：批量复制贴图（只做复制，不做引用回写）
+                if (textureCopyTasks.Count > 0)
+                {
+                    CopyTextureTasksInBatches(textureCopyTasks, ref copiedTextureCount, ref failedTextureCount);
+                }
+
+                AssetDatabase.Refresh();
+
+                // 阶段3：回写材质贴图引用
+                for (int i = 0; i < materialPaths.Count; i++)
+                {
+                    string materialPath = materialPaths[i];
+                    if (string.IsNullOrEmpty(materialPath) || IsAssetPathExcluded(materialPath, excludePaths))
+                    {
+                        continue;
+                    }
+
+                    Material material = AssetDatabase.LoadAssetAtPath<Material>(materialPath);
+                    if (material == null)
+                    {
+                        continue;
+                    }
+
+                    if (i == 0 || i == materialPaths.Count - 1 || i % 10 == 0)
+                    {
+                        EditorUtility.DisplayProgressBar(
+                            "处理中",
+                            $"[阶段3/3] 回写材质贴图: {material.name}",
+                            materialPaths.Count <= 1 ? 1f : (float)i / (materialPaths.Count - 1));
+                    }
+
+                    bool materialUpdated = RelinkMaterialTexturesWithCopiedMap(
+                        material,
+                        targetTexturesPath,
+                        excludePaths,
+                        textureGuidToCopiedPath,
+                        copiedTextureCache,
+                        ref failedTextureCount);
                     if (materialUpdated)
                     {
                         updatedMaterialCount++;
@@ -1145,28 +1220,30 @@ namespace ToolSet
         }
 
         /// <summary>
-        /// 处理单个材质中的贴图属性，将外部贴图复制到目标目录并更新引用
+        /// 收集单个材质中的贴图复制任务（阶段1）
         /// </summary>
-        private bool RelinkMaterialTexturesToCopiedAssets(
+        private void CollectTextureCopyTasksFromMaterial(
             Material material,
             string targetTexturesPath,
             List<string> excludePaths,
             Dictionary<string, string> textureGuidToCopiedPath,
-            ref int copiedTextureCount,
+            List<TextureCopyTask> textureCopyTasks,
+            HashSet<string> occupiedTexturePaths,
+            Dictionary<string, string> occupiedPathToGuid,
+            Dictionary<string, int> fileNameNextIndex,
             ref int skippedTextureCount,
             ref int failedTextureCount)
         {
             if (material == null)
             {
-                return false;
+                return;
             }
 
-            bool materialModified = false;
             SerializedObject serializedMaterial = new SerializedObject(material);
             SerializedProperty texEnvs = serializedMaterial.FindProperty("m_SavedProperties.m_TexEnvs");
             if (texEnvs == null || texEnvs.arraySize == 0)
             {
-                return false;
+                return;
             }
 
             for (int i = 0; i < texEnvs.arraySize; i++)
@@ -1212,37 +1289,116 @@ namespace ToolSet
 
                 if (!textureGuidToCopiedPath.TryGetValue(sourceTextureGuid, out string copiedTexturePath))
                 {
-                    copiedTexturePath = BuildUniqueTextureCopyPath(sourceTexturePath, targetTexturesPath, sourceTextureGuid);
+                    bool needCopy;
+                    copiedTexturePath = BuildUniqueTextureCopyPath(
+                        sourceTexturePath,
+                        targetTexturesPath,
+                        sourceTextureGuid,
+                        occupiedTexturePaths,
+                        occupiedPathToGuid,
+                        fileNameNextIndex,
+                        out needCopy);
                     if (string.IsNullOrEmpty(copiedTexturePath))
                     {
                         failedTextureCount++;
                         continue;
                     }
 
-                    bool copyResult = AssetDatabase.CopyAsset(sourceTexturePath, copiedTexturePath);
-                    if (!copyResult)
-                    {
-                        failedTextureCount++;
-                        Debug.LogError($"[材质贴图] 复制失败: {sourceTexturePath} -> {copiedTexturePath}");
-                        continue;
-                    }
-
                     textureGuidToCopiedPath[sourceTextureGuid] = copiedTexturePath;
-                    copiedTextureCount++;
-                    LogVerbose($"[材质贴图] 已复制贴图: {sourceTexturePath} -> {copiedTexturePath}");
+                    if (needCopy)
+                    {
+                        textureCopyTasks.Add(new TextureCopyTask
+                        {
+                            SourcePath = sourceTexturePath,
+                            TargetPath = copiedTexturePath
+                        });
+                    }
+                }
+            }
+        }
+
+        /// <summary>
+        /// 根据已复制贴图映射回写材质引用（阶段3）
+        /// </summary>
+        private bool RelinkMaterialTexturesWithCopiedMap(
+            Material material,
+            string targetTexturesPath,
+            List<string> excludePaths,
+            Dictionary<string, string> textureGuidToCopiedPath,
+            Dictionary<string, Texture> copiedTextureCache,
+            ref int failedTextureCount)
+        {
+            if (material == null)
+            {
+                return false;
+            }
+
+            bool materialModified = false;
+            SerializedObject serializedMaterial = new SerializedObject(material);
+            SerializedProperty texEnvs = serializedMaterial.FindProperty("m_SavedProperties.m_TexEnvs");
+            if (texEnvs == null || texEnvs.arraySize == 0)
+            {
+                return false;
+            }
+
+            for (int i = 0; i < texEnvs.arraySize; i++)
+            {
+                SerializedProperty textureProperty = texEnvs.GetArrayElementAtIndex(i);
+                SerializedProperty textureValue = textureProperty.FindPropertyRelative("second.m_Texture");
+                if (textureValue == null || textureValue.objectReferenceValue == null)
+                {
+                    continue;
                 }
 
-                Texture copiedTexture = AssetDatabase.LoadAssetAtPath<Texture>(copiedTexturePath);
-                if (copiedTexture == null)
+                Texture sourceTexture = textureValue.objectReferenceValue as Texture;
+                if (sourceTexture == null)
                 {
-                    // 懒导入：仅在加载失败时再强制导入，避免每张贴图都同步导入造成卡顿
-                    AssetDatabase.ImportAsset(copiedTexturePath, ImportAssetOptions.ForceSynchronousImport);
+                    continue;
+                }
+
+                string sourceTexturePath = AssetDatabase.GetAssetPath(sourceTexture);
+                if (string.IsNullOrEmpty(sourceTexturePath) || !sourceTexturePath.StartsWith("Assets/"))
+                {
+                    continue;
+                }
+
+                if (IsAssetPathExcluded(sourceTexturePath, excludePaths))
+                {
+                    continue;
+                }
+
+                if (sourceTexturePath.StartsWith(targetTexturesPath + "/"))
+                {
+                    continue;
+                }
+
+                string sourceTextureGuid = AssetDatabase.AssetPathToGUID(sourceTexturePath);
+                if (string.IsNullOrEmpty(sourceTextureGuid))
+                {
+                    continue;
+                }
+
+                if (!textureGuidToCopiedPath.TryGetValue(sourceTextureGuid, out string copiedTexturePath))
+                {
+                    continue;
+                }
+
+                if (!copiedTextureCache.TryGetValue(copiedTexturePath, out Texture copiedTexture) || copiedTexture == null)
+                {
                     copiedTexture = AssetDatabase.LoadAssetAtPath<Texture>(copiedTexturePath);
                     if (copiedTexture == null)
                     {
-                        failedTextureCount++;
-                        continue;
+                        AssetDatabase.ImportAsset(copiedTexturePath, ImportAssetOptions.ForceSynchronousImport);
+                        copiedTexture = AssetDatabase.LoadAssetAtPath<Texture>(copiedTexturePath);
                     }
+
+                    copiedTextureCache[copiedTexturePath] = copiedTexture;
+                }
+
+                if (copiedTexture == null)
+                {
+                    failedTextureCount++;
+                    continue;
                 }
 
                 if (textureValue.objectReferenceValue != copiedTexture)
@@ -1264,8 +1420,16 @@ namespace ToolSet
         /// <summary>
         /// 为贴图生成可用的目标复制路径；同名不同资源会自动追加序号
         /// </summary>
-        private string BuildUniqueTextureCopyPath(string sourceTexturePath, string targetTexturesPath, string sourceTextureGuid)
+        private string BuildUniqueTextureCopyPath(
+            string sourceTexturePath,
+            string targetTexturesPath,
+            string sourceTextureGuid,
+            HashSet<string> occupiedTexturePaths,
+            Dictionary<string, string> occupiedPathToGuid,
+            Dictionary<string, int> fileNameNextIndex,
+            out bool needCopy)
         {
+            needCopy = false;
             if (string.IsNullOrEmpty(sourceTexturePath) || string.IsNullOrEmpty(targetTexturesPath))
             {
                 return null;
@@ -1275,21 +1439,212 @@ namespace ToolSet
             string fileNameWithoutExtension = Path.GetFileNameWithoutExtension(fileName);
             string extension = Path.GetExtension(fileName);
             string candidatePath = $"{targetTexturesPath}/{fileName}";
-            int index = 1;
-
-            while (AssetDatabase.LoadMainAssetAtPath(candidatePath) != null || File.Exists(GetFullAssetPath(candidatePath)))
+            string fileKey = fileNameWithoutExtension + extension;
+            if (!fileNameNextIndex.TryGetValue(fileKey, out int index))
             {
-                string existingGuid = AssetDatabase.AssetPathToGUID(candidatePath);
-                if (!string.IsNullOrEmpty(existingGuid) && existingGuid == sourceTextureGuid)
+                index = 1;
+            }
+
+            while (true)
+            {
+                if (!occupiedTexturePaths.Contains(candidatePath))
                 {
+                    occupiedTexturePaths.Add(candidatePath);
+                    occupiedPathToGuid[candidatePath] = sourceTextureGuid;
+                    needCopy = true;
+                    fileNameNextIndex[fileKey] = index;
+                    return candidatePath;
+                }
+
+                if (occupiedPathToGuid.TryGetValue(candidatePath, out string existingGuid) &&
+                    !string.IsNullOrEmpty(existingGuid) &&
+                    existingGuid == sourceTextureGuid)
+                {
+                    needCopy = !File.Exists(GetFullAssetPath(candidatePath));
                     return candidatePath;
                 }
 
                 candidatePath = $"{targetTexturesPath}/{fileNameWithoutExtension}_{index}{extension}";
                 index++;
             }
+        }
 
-            return candidatePath;
+        /// <summary>
+        /// 批量复制贴图任务（阶段2），分批使用 Start/StopAssetEditing 降低导入开销
+        /// </summary>
+        private void CopyTextureTasksInBatches(
+            List<TextureCopyTask> textureCopyTasks,
+            ref int copiedTextureCount,
+            ref int failedTextureCount)
+        {
+            if (textureCopyTasks == null || textureCopyTasks.Count == 0)
+            {
+                return;
+            }
+
+            const int batchSize = 200;
+            int totalCount = textureCopyTasks.Count;
+
+            for (int batchStart = 0; batchStart < totalCount; batchStart += batchSize)
+            {
+                int batchEnd = Mathf.Min(batchStart + batchSize, totalCount);
+                bool startedAssetEditing = false;
+
+                try
+                {
+                    AssetDatabase.StartAssetEditing();
+                    startedAssetEditing = true;
+
+                    for (int i = batchStart; i < batchEnd; i++)
+                    {
+                        TextureCopyTask task = textureCopyTasks[i];
+                        if (i == 0 || i == totalCount - 1 || i % 20 == 0)
+                        {
+                            EditorUtility.DisplayProgressBar(
+                                "处理中",
+                                $"[阶段2/3] 批量复制贴图: {Path.GetFileName(task.SourcePath)}",
+                                totalCount <= 1 ? 0.5f : (float)i / (totalCount - 1));
+                        }
+
+                        bool copyResult = AssetDatabase.CopyAsset(task.SourcePath, task.TargetPath);
+                        if (copyResult)
+                        {
+                            copiedTextureCount++;
+                            LogVerbose($"[材质贴图] 已复制贴图: {task.SourcePath} -> {task.TargetPath}");
+                        }
+                        else
+                        {
+                            failedTextureCount++;
+                            Debug.LogError($"[材质贴图] 复制失败: {task.SourcePath} -> {task.TargetPath}");
+                        }
+                    }
+                }
+                finally
+                {
+                    if (startedAssetEditing)
+                    {
+                        AssetDatabase.StopAssetEditing();
+                    }
+                }
+            }
+        }
+
+        /// <summary>
+        /// 解析材质扫描范围：
+        /// 优先扫描分类目录（Materials/FxMaterials/ImageText）；
+        /// 若检测到分类目录外存在材质，则回退为扫描根目录，确保不漏材质。
+        /// </summary>
+        private List<string> ResolveMaterialPathsForTextureCopy(string sourceMaterialsPath)
+        {
+            HashSet<string> materialPaths = new HashSet<string>();
+            List<string> preferredFolders = new List<string>();
+            string[] preferredSubDirs = { SubDirMaterials, SubDirFxMaterials, SubDirImageText };
+            foreach (string subDir in preferredSubDirs)
+            {
+                string folderPath = $"{sourceMaterialsPath}/{subDir}";
+                if (AssetDatabase.IsValidFolder(folderPath))
+                {
+                    preferredFolders.Add(folderPath);
+                }
+            }
+
+            bool canUsePreferredOnly = preferredFolders.Count > 0 &&
+                                       AreAllMaterialsInsidePreferredFolders(sourceMaterialsPath, preferredFolders);
+            if (canUsePreferredOnly)
+            {
+                foreach (string folderPath in preferredFolders)
+                {
+                    string[] guids = AssetDatabase.FindAssets("t:Material", new[] { folderPath });
+                    foreach (string guid in guids)
+                    {
+                        string path = AssetDatabase.GUIDToAssetPath(guid);
+                        if (!string.IsNullOrEmpty(path))
+                        {
+                            materialPaths.Add(path);
+                        }
+                    }
+                }
+            }
+            else
+            {
+                string[] guids = AssetDatabase.FindAssets("t:Material", new[] { sourceMaterialsPath });
+                foreach (string guid in guids)
+                {
+                    string path = AssetDatabase.GUIDToAssetPath(guid);
+                    if (!string.IsNullOrEmpty(path))
+                    {
+                        materialPaths.Add(path);
+                    }
+                }
+            }
+
+            return materialPaths.ToList();
+        }
+
+        /// <summary>
+        /// 判断 sourceMaterialsPath 下所有材质是否都位于指定优先目录内
+        /// </summary>
+        private bool AreAllMaterialsInsidePreferredFolders(string sourceMaterialsPath, List<string> preferredFolders)
+        {
+            if (string.IsNullOrEmpty(sourceMaterialsPath) || preferredFolders == null || preferredFolders.Count == 0)
+            {
+                return false;
+            }
+
+            string sourceFullPath = GetFullAssetPath(sourceMaterialsPath).Replace("\\", "/").TrimEnd('/');
+            if (!Directory.Exists(sourceFullPath))
+            {
+                return false;
+            }
+
+            string[] materialFiles = Directory.GetFiles(sourceFullPath, "*.mat", SearchOption.AllDirectories);
+            foreach (string filePath in materialFiles)
+            {
+                string normalizedFilePath = filePath.Replace("\\", "/");
+                if (!normalizedFilePath.StartsWith(sourceFullPath + "/"))
+                {
+                    continue;
+                }
+
+                string relativePath = normalizedFilePath.Substring(sourceFullPath.Length).TrimStart('/');
+                string assetPath = $"{sourceMaterialsPath}/{relativePath}".Replace("\\", "/");
+                if (!IsPathInsideAnyFolder(assetPath, preferredFolders))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        /// <summary>
+        /// 判断路径是否位于任意目录中（严格目录边界）
+        /// </summary>
+        private bool IsPathInsideAnyFolder(string assetPath, List<string> folders)
+        {
+            if (string.IsNullOrEmpty(assetPath) || folders == null)
+            {
+                return false;
+            }
+
+            foreach (string folder in folders)
+            {
+                if (IsPathInFolderOrSubFolder(assetPath, folder))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// 贴图复制任务（阶段2）
+        /// </summary>
+        private class TextureCopyTask
+        {
+            public string SourcePath;
+            public string TargetPath;
         }
         
         /// <summary>
@@ -1308,7 +1663,8 @@ namespace ToolSet
         private void CopyMaterialsFromParticle(GameObject instance)
         {
             // 跨所有 Renderer 共享 GUID 去重表，确保同一材质只复制一次
-            List<string> sourceMatIDs = new List<string>();
+            HashSet<string> sourceMatIDs = new HashSet<string>();
+            Dictionary<string, Material> copiedMatCache = new Dictionary<string, Material>();
             List<string> excludePaths = BuildExcludePaths("粒子材质");
 
             EditorUtility.DisplayProgressBar("处理中", "正在复制粒子材质...", 0.6f);
@@ -1326,14 +1682,14 @@ namespace ToolSet
                     if (renderer.renderMode != ParticleSystemRenderMode.None)
                     {
                         renderer.sharedMaterial = CopySingleMaterialIfNeeded(
-                            renderer.sharedMaterial, FxMaterialsCopyPath, sourceMatIDs, excludePaths, "粒子材质");
+                            renderer.sharedMaterial, FxMaterialsCopyPath, sourceMatIDs, copiedMatCache, excludePaths, "粒子材质");
                     }
 
                     // 粒子系统内置拖尾(trails 模块)材质
                     if (particle.trails.enabled)
                     {
                         renderer.trailMaterial = CopySingleMaterialIfNeeded(
-                            renderer.trailMaterial, FxMaterialsCopyPath, sourceMatIDs, excludePaths, "粒子材质");
+                            renderer.trailMaterial, FxMaterialsCopyPath, sourceMatIDs, copiedMatCache, excludePaths, "粒子材质");
                     }
 
                 }
@@ -1344,7 +1700,7 @@ namespace ToolSet
                 LogVerbose($"[粒子材质] 检测到 TrailRenderer 数量: {trailRenderers.Length}");
                 foreach (TrailRenderer trailRenderer in trailRenderers)
                 {
-                    CopyAndReplaceRendererMaterials(trailRenderer, FxMaterialsCopyPath, sourceMatIDs, excludePaths, "Trail材质");
+                    CopyAndReplaceRendererMaterials(trailRenderer, FxMaterialsCopyPath, sourceMatIDs, copiedMatCache, excludePaths, "Trail材质");
                 }
 
                 AssetDatabase.Refresh();
@@ -1372,7 +1728,8 @@ namespace ToolSet
         /// <param name="excludePaths">排除目录路径列表</param>
         /// <param name="logTag">日志标签，便于区分调用来源</param>
         /// <returns>替换后的材质引用（可能是副本，也可能是原材质）</returns>
-        private Material CopySingleMaterialIfNeeded(Material sourceMat, string copyPath, List<string> sourceMatIDs, List<string> excludePaths, string logTag)
+        private Material CopySingleMaterialIfNeeded(Material sourceMat, string copyPath, HashSet<string> sourceMatIDs,
+            Dictionary<string, Material> copiedMatCache, List<string> excludePaths, string logTag)
         {
             if (sourceMat == null) return null;
 
@@ -1398,6 +1755,10 @@ namespace ToolSet
 
             string id = AssetDatabase.AssetPathToGUID(path);
             string copyFilePath;
+            if (!string.IsNullOrEmpty(id) && copiedMatCache.TryGetValue(id, out Material cachedMat) && cachedMat != null)
+            {
+                return cachedMat;
+            }
 
             if (sourceMatIDs.Contains(id))
             {
@@ -1406,6 +1767,10 @@ namespace ToolSet
                 if (!string.IsNullOrEmpty(copyFilePath))
                 {
                     Material copiedMat = (Material)AssetDatabase.LoadAssetAtPath(copyFilePath, typeof(Material));
+                    if (copiedMat != null && !string.IsNullOrEmpty(id))
+                    {
+                        copiedMatCache[id] = copiedMat;
+                    }
                     return copiedMat != null ? copiedMat : sourceMat;
                 }
                 return sourceMat;
@@ -1417,6 +1782,10 @@ namespace ToolSet
             if (!string.IsNullOrEmpty(copyFilePath))
             {
                 Material copiedMat = (Material)AssetDatabase.LoadAssetAtPath(copyFilePath, typeof(Material));
+                if (copiedMat != null && !string.IsNullOrEmpty(id))
+                {
+                    copiedMatCache[id] = copiedMat;
+                }
                 LogVerbose($"[{logTag}] 已复制材质: {sourceMat.name} -> {copyFilePath}");
                 return copiedMat != null ? copiedMat : sourceMat;
             }
@@ -1434,7 +1803,8 @@ namespace ToolSet
         /// <param name="sourceMatIDs">已复制材质的 GUID 列表（外部共享，跨调用去重）</param>
         /// <param name="excludePaths">排除目录路径列表</param>
         /// <param name="logTag">日志标签</param>
-        private void CopyAndReplaceRendererMaterials(Renderer renderer, string copyPath, List<string> sourceMatIDs, List<string> excludePaths, string logTag)
+        private void CopyAndReplaceRendererMaterials(Renderer renderer, string copyPath, HashSet<string> sourceMatIDs,
+            Dictionary<string, Material> copiedMatCache, List<string> excludePaths, string logTag)
         {
             if (renderer == null) return;
 
@@ -1445,7 +1815,7 @@ namespace ToolSet
 
             for (int i = 0; i < sharedMats.Length; i++)
             {
-                updateList[i] = CopySingleMaterialIfNeeded(sharedMats[i], copyPath, sourceMatIDs, excludePaths, logTag);
+                updateList[i] = CopySingleMaterialIfNeeded(sharedMats[i], copyPath, sourceMatIDs, copiedMatCache, excludePaths, logTag);
             }
 
             renderer.sharedMaterials = updateList;
@@ -1610,7 +1980,7 @@ namespace ToolSet
             // 获取所有粒子系统组件
             var particles = instance.GetComponentsInChildren<ParticleSystem>(true);
             // 记录已复制的网格GUID，避免重复复制
-            List<string> sourceMeshIDs = new List<string>();
+            HashSet<string> sourceMeshIDs = new HashSet<string>();
             List<string> excludePaths = BuildExcludePaths("粒子网格");
 
             string copyFilePath = "";
@@ -1681,7 +2051,7 @@ namespace ToolSet
         private void CopyMeshFromMeshFilter(GameObject instance)
         {
             var meshFilters = instance.GetComponentsInChildren<MeshFilter>(true);
-            List<string> sourceMeshIDs = new List<string>();
+            HashSet<string> sourceMeshIDs = new HashSet<string>();
             List<string> excludePaths = BuildExcludePaths("MeshFilter网格");
 
             EditorUtility.DisplayProgressBar("处理中", "正在复制 MeshFilter 网格...", 0.5f);
