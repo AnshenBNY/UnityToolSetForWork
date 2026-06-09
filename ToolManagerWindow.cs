@@ -6,7 +6,7 @@ using ToolSet;
 public class ToolManagerWindow : EditorWindow
 {
     private int currentTab = 0;
-    private readonly string[] tabNames = { "预制体复制", "贴图复制", "批量重命名" ,"查询GUID引用工具","材质、预制体映射","批量修改模型导入设置"};
+    private readonly string[] tabNames = { "预制体复制", "贴图复制", "批量重命名" ,"查询GUID引用工具","材质、预制体映射","批量修改模型导入设置", "依赖记录检查" };
 
     // 缓存每个工具的实例（避免每次重绘都新建）
     private readonly Dictionary<int, IToolGUI> toolInstances = new();
@@ -20,6 +20,7 @@ public class ToolManagerWindow : EditorWindow
         EnsureToolInstance(3,() => new ClearGuidOfObject());
         EnsureToolInstance(4,() => new PrefabMatProjectTool());
         EnsureToolInstance(5,() => new BatchChangeModelImport());
+        EnsureToolInstance(6,() => new DependencyRecordTool());
     }
 
     private void OnDisable()
