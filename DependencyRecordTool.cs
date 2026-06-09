@@ -63,6 +63,7 @@ namespace ToolSet
         public int missingCount;
         public int builtInCount;
         public List<DependencyCheckItem> items = new();
+        public List<string> rootPaths = new();
     }
 
     [Serializable]
@@ -109,6 +110,10 @@ namespace ToolSet
         private bool targetFoldout = true;
         private bool exportFoldout = true;
         private bool parseFoldout = true;
+        private static readonly HashSet<string> RepairSupportedExtensions = new(StringComparer.OrdinalIgnoreCase)
+        {
+            ".prefab", ".unity", ".mat", ".asset", ".controller", ".overrideController", ".anim", ".playable", ".guiskin"
+        };
 
         private DependencyCheckReport lastReport;
 
@@ -364,6 +369,23 @@ namespace ToolSet
 
             EditorGUILayout.HelpBox(sb.ToString(), messageType);
 
+            if (item.state == DependencyState.Missing && item.referencedByRoots != null && item.referencedByRoots.Count > 0)
+            {
+                EditorGUILayout.LabelField("引用来源对象（可跳转）:");
+                for (int i = 0; i < item.referencedByRoots.Count; i++)
+                {
+                    string rootPath = item.referencedByRoots[i];
+                    using (new EditorGUILayout.HorizontalScope())
+                    {
+                        EditorGUILayout.SelectableLabel(rootPath, GUILayout.Height(EditorGUIUtility.singleLineHeight));
+                        if (GUILayout.Button("跳转", GUILayout.Width(58)))
+                        {
+                            PingAssetByPath(rootPath);
+                        }
+                    }
+                }
+            }
+
             if (item.state == DependencyState.Missing && item.candidatePaths != null && item.candidatePaths.Count > 0)
             {
                 EditorGUILayout.LabelField("候选资源（可定位）:");
@@ -375,6 +397,11 @@ namespace ToolSet
                         if (GUILayout.Button("Ping", GUILayout.Width(58)))
                         {
                             PingAssetByPath(candidate);
+                        }
+
+                        if (GUILayout.Button("使用该候补修复", GUILayout.Width(110)))
+                        {
+                            TryRepairMissingReference(item, candidate);
                         }
                     }
                 }
@@ -767,7 +794,14 @@ namespace ToolSet
         {
             DependencyCheckReport report = new()
             {
-                sourceFileName = sourceFileName
+                sourceFileName = sourceFileName,
+                rootPaths = data.roots == null
+                    ? new List<string>()
+                    : data.roots
+                        .Where(r => !string.IsNullOrEmpty(r.path))
+                        .Select(r => r.path)
+                        .Distinct(StringComparer.OrdinalIgnoreCase)
+                        .ToList()
             };
 
             foreach (DependencyRecordItem dep in data.dependencies)
@@ -977,6 +1011,229 @@ namespace ToolSet
 
             Selection.activeObject = asset;
             EditorGUIUtility.PingObject(asset);
+        }
+
+        private void TryRepairMissingReference(DependencyCheckItem item, string candidatePath)
+        {
+            if (item == null || string.IsNullOrWhiteSpace(candidatePath))
+            {
+                return;
+            }
+
+            if (item.state != DependencyState.Missing)
+            {
+                EditorUtility.DisplayDialog("提示", "当前项不是丢失引用，无需修复。", "确定");
+                return;
+            }
+
+            if (string.IsNullOrWhiteSpace(item.guid))
+            {
+                EditorUtility.DisplayDialog("提示", "该丢失项没有 GUID，暂时无法自动修复。", "确定");
+                return;
+            }
+
+            string candidateGuid = AssetDatabase.AssetPathToGUID(candidatePath);
+            if (string.IsNullOrWhiteSpace(candidateGuid))
+            {
+                EditorUtility.DisplayDialog("提示", "候补资源 GUID 无效，无法修复。", "确定");
+                return;
+            }
+
+            if (candidateGuid == item.guid)
+            {
+                EditorUtility.DisplayDialog("提示", "候补资源与缺失 GUID 相同，不需要修复。", "确定");
+                return;
+            }
+
+            bool confirm = EditorUtility.DisplayDialog(
+                "确认修复引用",
+                $"将把引用 GUID\n{item.guid}\n替换为\n{candidateGuid}\n\n候补资源：{candidatePath}\n\n仅会修改可文本处理的资产文件。",
+                "确认修复",
+                "取消");
+            if (!confirm)
+            {
+                return;
+            }
+
+            List<string> targetAssetPaths = CollectRepairTargetAssetPaths(item);
+            if (targetAssetPaths.Count == 0)
+            {
+                EditorUtility.DisplayDialog("提示", "没有找到可尝试修复的目标资源。", "确定");
+                return;
+            }
+
+            int changedCount = 0;
+            int scannedCount = 0;
+            for (int i = 0; i < targetAssetPaths.Count; i++)
+            {
+                string assetPath = targetAssetPaths[i];
+                if (!IsSupportedRepairFile(assetPath))
+                {
+                    continue;
+                }
+
+                string absolutePath = ToAbsolutePath(assetPath);
+                if (!File.Exists(absolutePath))
+                {
+                    continue;
+                }
+
+                scannedCount++;
+                string content = File.ReadAllText(absolutePath, Encoding.UTF8);
+                if (!content.Contains(item.guid))
+                {
+                    continue;
+                }
+
+                string replaced = content.Replace(item.guid, candidateGuid);
+                if (ReferenceEquals(content, replaced) || content == replaced)
+                {
+                    continue;
+                }
+
+                File.WriteAllText(absolutePath, replaced, new UTF8Encoding(false));
+                AssetDatabase.ImportAsset(assetPath, ImportAssetOptions.ForceUpdate);
+                changedCount++;
+            }
+
+            AssetDatabase.Refresh();
+            string result = $"扫描 {scannedCount} 个资源，修复 {changedCount} 个。";
+            if (changedCount > 0)
+            {
+                item.state = DependencyState.Present;
+                item.currentPath = candidatePath;
+                item.guid = candidateGuid;
+                item.candidatePaths.Clear();
+                statusMessage = $"修复完成：{item.fileName} -> {Path.GetFileName(candidatePath)}";
+            }
+            else
+            {
+                statusMessage = "未找到可替换的引用片段";
+            }
+
+            EditorUtility.DisplayDialog("修复结果", result, "确定");
+            if (lastReport != null)
+            {
+                lastReport.presentCount = lastReport.items.Count(v => v.state == DependencyState.Present);
+                lastReport.missingCount = lastReport.items.Count(v => v.state == DependencyState.Missing);
+            }
+        }
+
+        private List<string> CollectRepairTargetAssetPaths(DependencyCheckItem item)
+        {
+            HashSet<string> targetPaths = new(StringComparer.OrdinalIgnoreCase);
+
+            if (item.referencedByRoots != null)
+            {
+                foreach (string rootPath in item.referencedByRoots)
+                {
+                    if (!string.IsNullOrWhiteSpace(rootPath))
+                    {
+                        targetPaths.Add(rootPath);
+                    }
+                }
+            }
+
+            if (lastReport?.rootPaths != null)
+            {
+                foreach (string rootPath in lastReport.rootPaths)
+                {
+                    if (!string.IsNullOrWhiteSpace(rootPath))
+                    {
+                        targetPaths.Add(rootPath);
+                    }
+                }
+            }
+
+            foreach (string foundPath in FindAssetPathsContainingGuid(item.guid))
+            {
+                targetPaths.Add(foundPath);
+            }
+
+            return targetPaths.ToList();
+        }
+
+        private static IEnumerable<string> FindAssetPathsContainingGuid(string guid)
+        {
+            if (string.IsNullOrWhiteSpace(guid))
+            {
+                yield break;
+            }
+
+            string assetsAbsolutePath = Application.dataPath;
+            if (!Directory.Exists(assetsAbsolutePath))
+            {
+                yield break;
+            }
+
+            foreach (string absolutePath in Directory.EnumerateFiles(assetsAbsolutePath, "*.*", SearchOption.AllDirectories))
+            {
+                string extension = Path.GetExtension(absolutePath);
+                if (!RepairSupportedExtensions.Contains(extension))
+                {
+                    continue;
+                }
+
+                string content;
+                try
+                {
+                    content = File.ReadAllText(absolutePath, Encoding.UTF8);
+                }
+                catch
+                {
+                    continue;
+                }
+
+                if (!content.Contains(guid))
+                {
+                    continue;
+                }
+
+                string assetPath = ToAssetPath(absolutePath);
+                if (!string.IsNullOrWhiteSpace(assetPath))
+                {
+                    yield return assetPath;
+                }
+            }
+        }
+
+        private static bool IsSupportedRepairFile(string assetPath)
+        {
+            if (string.IsNullOrWhiteSpace(assetPath))
+            {
+                return false;
+            }
+
+            string extension = Path.GetExtension(assetPath);
+            return RepairSupportedExtensions.Contains(extension);
+        }
+
+        private static string ToAbsolutePath(string assetPath)
+        {
+            if (string.IsNullOrWhiteSpace(assetPath))
+            {
+                return string.Empty;
+            }
+
+            if (!assetPath.StartsWith("Assets", StringComparison.OrdinalIgnoreCase))
+            {
+                return string.Empty;
+            }
+
+            string relative = assetPath.Substring("Assets".Length).TrimStart('/', '\\');
+            return Path.Combine(Application.dataPath, relative);
+        }
+
+        private static string ToAssetPath(string absolutePath)
+        {
+            string assetsAbsolutePath = Application.dataPath;
+            if (!absolutePath.StartsWith(assetsAbsolutePath, StringComparison.OrdinalIgnoreCase))
+            {
+                return string.Empty;
+            }
+
+            string relative = absolutePath.Substring(assetsAbsolutePath.Length).TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            return "Assets/" + relative.Replace('\\', '/');
         }
     }
 }
