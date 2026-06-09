@@ -110,6 +110,9 @@ namespace ToolSet
         private bool targetFoldout = true;
         private bool exportFoldout = true;
         private bool parseFoldout = true;
+        private bool repairOnlyJsonScope = true;
+        private bool repairExpandRootDependencies = true;
+        private readonly Dictionary<string, List<string>> rootDependencyScopeCache = new(StringComparer.OrdinalIgnoreCase);
         private static readonly HashSet<string> RepairSupportedExtensions = new(StringComparer.OrdinalIgnoreCase)
         {
             ".prefab", ".unity", ".mat", ".asset", ".controller", ".overrideController", ".anim", ".playable", ".guiskin"
@@ -318,6 +321,8 @@ namespace ToolSet
                     ExportMissingReportJson(lastReport);
                 }
             }
+            repairOnlyJsonScope = EditorGUILayout.ToggleLeft("修复仅限 JSON 记录范围（推荐）", repairOnlyJsonScope);
+            repairExpandRootDependencies = EditorGUILayout.ToggleLeft("修复时扩展扫描根对象依赖链", repairExpandRootDependencies);
 
             resultScroll = EditorGUILayout.BeginScrollView(resultScroll, GUILayout.Height(220));
             foreach (DependencyCheckItem item in lastReport.items)
@@ -769,6 +774,7 @@ namespace ToolSet
             }
 
             lastReport = BuildCheckReport(data, sourceName);
+            rootDependencyScopeCache.Clear();
             statusMessage = $"检查完成：丢失 {lastReport.missingCount} / {lastReport.totalCount}";
         }
 
@@ -1064,6 +1070,7 @@ namespace ToolSet
 
             int changedCount = 0;
             int scannedCount = 0;
+            List<string> changedAssetPaths = new();
             for (int i = 0; i < targetAssetPaths.Count; i++)
             {
                 string assetPath = targetAssetPaths[i];
@@ -1092,11 +1099,27 @@ namespace ToolSet
                 }
 
                 File.WriteAllText(absolutePath, replaced, new UTF8Encoding(false));
-                AssetDatabase.ImportAsset(assetPath, ImportAssetOptions.ForceUpdate);
+                changedAssetPaths.Add(assetPath);
                 changedCount++;
             }
 
-            AssetDatabase.Refresh();
+            if (changedAssetPaths.Count > 0)
+            {
+                AssetDatabase.StartAssetEditing();
+                try
+                {
+                    for (int i = 0; i < changedAssetPaths.Count; i++)
+                    {
+                        AssetDatabase.ImportAsset(changedAssetPaths[i], ImportAssetOptions.ForceUpdate);
+                    }
+                }
+                finally
+                {
+                    AssetDatabase.StopAssetEditing();
+                }
+            }
+
+            AssetDatabase.Refresh(ImportAssetOptions.ForceUpdate);
             string result = $"扫描 {scannedCount} 个资源，修复 {changedCount} 个。";
             if (changedCount > 0)
             {
@@ -1122,6 +1145,7 @@ namespace ToolSet
         private List<string> CollectRepairTargetAssetPaths(DependencyCheckItem item)
         {
             HashSet<string> targetPaths = new(StringComparer.OrdinalIgnoreCase);
+            List<string> scopeRoots = new();
 
             if (item.referencedByRoots != null)
             {
@@ -1130,27 +1154,67 @@ namespace ToolSet
                     if (!string.IsNullOrWhiteSpace(rootPath))
                     {
                         targetPaths.Add(rootPath);
+                        scopeRoots.Add(rootPath);
                     }
                 }
             }
 
-            if (lastReport?.rootPaths != null)
+            if (lastReport?.rootPaths != null && !repairOnlyJsonScope)
             {
                 foreach (string rootPath in lastReport.rootPaths)
                 {
                     if (!string.IsNullOrWhiteSpace(rootPath))
                     {
                         targetPaths.Add(rootPath);
+                        scopeRoots.Add(rootPath);
                     }
                 }
             }
 
-            foreach (string foundPath in FindAssetPathsContainingGuid(item.guid))
+            if (repairExpandRootDependencies)
             {
-                targetPaths.Add(foundPath);
+                foreach (string rootPath in scopeRoots.Distinct(StringComparer.OrdinalIgnoreCase))
+                {
+                    foreach (string depPath in GetCachedDependenciesForRoot(rootPath))
+                    {
+                        if (IsSupportedRepairFile(depPath))
+                        {
+                            targetPaths.Add(depPath);
+                        }
+                    }
+                }
+            }
+
+            if (!repairOnlyJsonScope)
+            {
+                foreach (string foundPath in FindAssetPathsContainingGuid(item.guid))
+                {
+                    targetPaths.Add(foundPath);
+                }
             }
 
             return targetPaths.ToList();
+        }
+
+        private List<string> GetCachedDependenciesForRoot(string rootPath)
+        {
+            if (string.IsNullOrWhiteSpace(rootPath))
+            {
+                return new List<string>();
+            }
+
+            if (rootDependencyScopeCache.TryGetValue(rootPath, out List<string> cached))
+            {
+                return cached;
+            }
+
+            string[] dependencies = AssetDatabase.GetDependencies(rootPath, true);
+            List<string> list = dependencies
+                .Where(IsSupportedRepairFile)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            rootDependencyScopeCache[rootPath] = list;
+            return list;
         }
 
         private static IEnumerable<string> FindAssetPathsContainingGuid(string guid)
