@@ -128,35 +128,20 @@ namespace ToolSet
         {
             EnsurePreferencesLoaded();
 
-            EditorGUILayout.Space(8);
             EnsureUiStyles();
-            EditorGUILayout.LabelField("依赖记录工具", EditorStyles.largeLabel);
+            ToolUi.DrawToolHeader("依赖记录工具",
+                "推荐流程：① 选择目标资源/目录  ② 配置导出规则并保存 JSON  ③ 在目标工程解析 JSON 检查丢失依赖");
             DrawLargeHint(
-                "推荐流程：\n" +
-                "① 选择目标资源/目录  ② 配置导出规则并保存 JSON  ③ 在目标工程解析 JSON 检查丢失依赖",
+                "结果列表按卡片分组显示：每项包含状态、资源类型、基础信息、引用来源与候选修复区。",
                 MessageType.Info);
             EditorGUILayout.Space(6);
 
-            DrawSectionCard("1) 目标选择", ref targetFoldout, DrawTargetSection);
-            DrawSectionCard("2) 导出配置与保存", ref exportFoldout, DrawExportSection);
-            DrawSectionCard("3) 解析检查与报告", ref parseFoldout, DrawParseSection);
+            ToolUi.DrawFoldoutCard("1) 目标选择", ref targetFoldout, DrawTargetSection);
+            ToolUi.DrawFoldoutCard("2) 导出配置与保存", ref exportFoldout, DrawExportSection);
+            ToolUi.DrawFoldoutCard("3) 解析检查与报告", ref parseFoldout, DrawParseSection);
 
             EditorGUILayout.Space(10);
-            DrawLargeHint($"状态：{statusMessage}", MessageType.None);
-        }
-
-        private static void DrawSectionCard(string title, ref bool foldout, Action drawContent)
-        {
-            EditorGUILayout.BeginVertical("box");
-            foldout = EditorGUILayout.Foldout(foldout, title, true);
-            if (foldout)
-            {
-                EditorGUILayout.Space(2);
-                drawContent?.Invoke();
-            }
-
-            EditorGUILayout.EndVertical();
-            EditorGUILayout.Space(4);
+            ToolUi.DrawStatus(statusMessage);
         }
 
         private void DrawTargetSection()

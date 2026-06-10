@@ -21,6 +21,7 @@ namespace ToolSet
     
         private bool fxToggle = true;
         private bool matToggle = false;
+        private string statusMessage = "等待操作";
         // [MenuItem("BjTools/预制体&材质映射工具")]
         // public static void ShowWindow()
         // {
@@ -29,31 +30,28 @@ namespace ToolSet
     
         public void DrawGUI() 
         {
-            EditorGUILayout.Space(10);
-            EditorGUILayout.LabelField("预制体&材质映射工具",EditorStyles.boldLabel);
-            EditorGUILayout.Space(10);
+            ToolUi.DrawToolHeader("预制体&材质映射工具", "按源节点映射到目标节点，可独立选择预制体映射与材质映射。");
+
+            ToolUi.BeginCard("1) 输入对象");
             EditorGUILayout.LabelField("源根节点：");
-            source = EditorGUILayout.ObjectField(source,typeof(GameObject)) as GameObject;
+            source = EditorGUILayout.ObjectField(source, typeof(GameObject)) as GameObject;
             EditorGUILayout.LabelField("目标根节点：");
             target = EditorGUILayout.ObjectField(target, typeof(GameObject)) as GameObject;
-            EditorGUILayout.Space(10);
-            EditorGUILayout.BeginHorizontal();
-            EditorGUILayout.LabelField("预制体映射");
-            fxToggle = EditorGUILayout.Toggle(fxToggle);
-            EditorGUILayout.EndHorizontal();
-           
-            EditorGUILayout.BeginHorizontal();
-            EditorGUILayout.LabelField("材质映射");
-            matToggle = EditorGUILayout.Toggle(matToggle);
-            EditorGUILayout.EndHorizontal();
-            EditorGUILayout.Space(10);
-            EditorGUILayout.LabelField("【注意】预制体映射会解包预制体在源根节点中的所有父级预制体。",EditorStyles.boldLabel);
-            EditorGUILayout.Space(10);
-            
-            if (GUILayout.Button(("运行")))
+            ToolUi.EndCard();
+
+            ToolUi.BeginCard("2) 映射选项");
+            fxToggle = EditorGUILayout.ToggleLeft("预制体映射", fxToggle);
+            matToggle = EditorGUILayout.ToggleLeft("材质映射", matToggle);
+            EditorGUILayout.HelpBox("注意：预制体映射会解包源根节点中的父级预制体实例。", MessageType.Warning);
+            ToolUi.EndCard();
+
+            ToolUi.BeginCard("3) 执行");
+            if (GUILayout.Button("运行", GUILayout.Height(28)))
             {
                 Run();
             }
+            ToolUi.EndCard();
+            ToolUi.DrawStatus(statusMessage);
         }
     
         private void Run()
@@ -62,11 +60,13 @@ namespace ToolSet
             if (source == null)
             {
                 Debug.LogError("未选择源根节点！");
+                statusMessage = "未选择源根节点";
                 return;
             }
             if (target == null)
             {
                 Debug.LogError("未选择目标根节点！");
+                statusMessage = "未选择目标根节点";
                 return;
             }
     
@@ -79,7 +79,7 @@ namespace ToolSet
             {
                 ProjectMat();
             }
-    
+            statusMessage = "运行完成";
         }
     
         private void GetSkinnedMeshRenderers(GameObject src)

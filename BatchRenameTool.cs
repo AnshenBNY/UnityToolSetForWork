@@ -17,15 +17,15 @@ namespace ToolSet
         private InsertPosition insertPosition = InsertPosition.开头;
         private RenameTarget renameTarget = RenameTarget.资源文件;
         private bool includeChildren = true;
+        private string statusMessage = "等待操作";
 
         private Options options = Options.基础名称加序号;
 
         public void DrawGUI()
         {
-            EditorGUILayout.Space(10);
-            GUILayout.Label("批量重命名工具", EditorStyles.boldLabel);
-            EditorGUILayout.Space(10);
+            ToolUi.DrawToolHeader("批量重命名工具", "支持资源文件与Hierarchy节点的统一命名规则。");
 
+            ToolUi.BeginCard("1) 目标与规则");
             GUILayout.Label("作用对象：", EditorStyles.boldLabel);
             renameTarget = (RenameTarget)EditorGUILayout.EnumPopup(renameTarget);
 
@@ -54,13 +54,19 @@ namespace ToolSet
                     insertIndex = EditorGUILayout.IntField("位置索引:", insertIndex);
                 }
             }
+            ToolUi.EndCard();
 
+            ToolUi.BeginCard("2) 执行");
             if (GUILayout.Button("重命名"))
             {
                 PerformRename();
             }
+            ToolUi.EndCard();
 
+            ToolUi.BeginCard("3) 当前选择");
             DrawCurrentSelection();
+            ToolUi.EndCard();
+            ToolUi.DrawStatus(statusMessage);
         }
 
         private void PerformRename()
@@ -181,6 +187,7 @@ namespace ToolSet
             AssetDatabase.SaveAssets();
             AssetDatabase.Refresh();
             Debug.Log($"资源重命名完成，共成功 {renamedCount} 个。");
+            statusMessage = $"资源重命名完成：成功 {renamedCount} 个";
         }
 
         private void RenameHierarchyNodes()
@@ -215,6 +222,7 @@ namespace ToolSet
             }
 
             Debug.Log($"Hierarchy节点重命名完成，共成功 {renamedCount} 个。");
+            statusMessage = $"Hierarchy节点重命名完成：成功 {renamedCount} 个";
         }
 
         private string BuildNewName(string oldName, int sequence)

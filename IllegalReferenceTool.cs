@@ -58,18 +58,15 @@ namespace ToolSet
         {
             EnsureUiStyles();
 
-            EditorGUILayout.Space(8);
-            EditorGUILayout.LabelField("非法引用查询工具", EditorStyles.largeLabel);
-            DrawLargeHint(
-                "用途：在指定查询对象中扫描“命中排除规则”的依赖引用，支持定位、候选替换、删除引用（GUID置空）、复制并替换。",
-                MessageType.Info);
+            ToolUi.DrawToolHeader("非法引用查询工具",
+                "用途：在指定查询对象中扫描“命中排除规则”的依赖引用，支持定位、候选替换、删除引用（GUID置空）、复制并替换。");
 
-            DrawSectionCard("1) 查询对象", ref targetFoldout, DrawTargetSection);
-            DrawSectionCard("2) 非法规则（排除目录/类型）", ref ruleFoldout, DrawRuleSection);
-            DrawSectionCard("3) 查询结果与处理", ref resultFoldout, DrawResultSection);
+            ToolUi.DrawFoldoutCard("1) 查询对象", ref targetFoldout, DrawTargetSection);
+            ToolUi.DrawFoldoutCard("2) 非法规则（排除目录/类型）", ref ruleFoldout, DrawRuleSection);
+            ToolUi.DrawFoldoutCard("3) 查询结果与处理", ref resultFoldout, DrawResultSection);
 
             EditorGUILayout.Space(8);
-            DrawLargeHint($"状态：{statusMessage}", MessageType.None);
+            ToolUi.DrawStatus(statusMessage);
         }
 
         private void DrawTargetSection()
@@ -723,20 +720,6 @@ namespace ToolSet
             return assetPath.StartsWith(folderPath + "/", StringComparison.OrdinalIgnoreCase);
         }
 
-        private static void DrawSectionCard(string title, ref bool foldout, Action drawContent)
-        {
-            EditorGUILayout.BeginVertical("box");
-            foldout = EditorGUILayout.Foldout(foldout, title, true);
-            if (foldout)
-            {
-                EditorGUILayout.Space(2);
-                drawContent?.Invoke();
-            }
-
-            EditorGUILayout.EndVertical();
-            EditorGUILayout.Space(4);
-        }
-
         private static void PingAssetByPath(string path)
         {
             if (string.IsNullOrWhiteSpace(path))
@@ -776,11 +759,6 @@ namespace ToolSet
                     PingAssetByPath(path);
                 }
             }
-        }
-
-        private void DrawLargeHint(string content, MessageType type)
-        {
-            EditorGUILayout.HelpBox(content, type);
         }
 
         private void EnsureUiStyles()

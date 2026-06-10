@@ -132,9 +132,7 @@ namespace ToolSet
         /// </summary>
         public void DrawGUI()
         {
-            EditorGUILayout.Space(10);
-            EditorGUILayout.LabelField("Prefab复制工具", EditorStyles.boldLabel);
-            EditorGUILayout.Space(10);
+            ToolUi.DrawToolHeader("Prefab复制工具", "支持一键复制与分步复制，按模块输出并可维护引用关系。");
             
             // 使用盒子区域组织UI
             EditorGUILayout.BeginVertical("box");
@@ -476,12 +474,7 @@ namespace ToolSet
             // }
     
             EditorGUILayout.Space();
-    
-            // 显示当前状态
-            EditorGUILayout.BeginVertical("box");
-            DrawSectionSeparator("当前状态");
-            EditorGUILayout.HelpBox(currentStatus, MessageType.Info);
-            EditorGUILayout.EndVertical();
+            ToolUi.DrawStatus(currentStatus, MessageType.Info);
         }
 
         /// <summary>

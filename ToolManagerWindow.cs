@@ -35,10 +35,8 @@ public class ToolManagerWindow : EditorWindow
 
     private void OnGUI()
     {
-       
-        currentTab = GUILayout.Toolbar(currentTab, tabNames, GUILayout.Height(30));
- 
-        EditorGUILayout.Separator();
+        currentTab = GUILayout.Toolbar(currentTab, tabNames, GUILayout.Height(32));
+        EditorGUILayout.Space(6);
 
         // 获取当前工具实例并绘制
         if (toolInstances.TryGetValue(currentTab, out var tool))
@@ -57,11 +55,11 @@ public class ToolManagerWindow : EditorWindow
         }
     }
     // 3. 一键打开主窗口（菜单入口）
-    [MenuItem("BjTools/工具合集", false, 10)]
+    [MenuItem("BjTools/多功能电饭煲", false, 10)]
     public static void OpenHub()
     {
         ToolManagerWindow window = GetWindow<ToolManagerWindow>();
-        window.titleContent = new GUIContent("工具合集");
+        window.titleContent = new GUIContent("多功能电饭煲");
         window.Show();
     }
 }

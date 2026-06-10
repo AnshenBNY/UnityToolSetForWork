@@ -16,27 +16,35 @@ namespace ToolSet
         private bool applyMaterialImportMode = true;
         private bool applyAnimationError;
         private bool applyAvatarDefinition;
+        private string statusMessage = "等待操作";
         private Vector2 scrollPosition;
 
         public void DrawGUI()
         {
-            EditorGUILayout.Space(10);
-            GUILayout.Label("批量修改模型导入设置", EditorStyles.boldLabel);
-            EditorGUILayout.Space(10);
+            ToolUi.DrawToolHeader("批量修改模型导入设置", "分组开关控制，每组参数独立应用。");
 
             selectedFBXGUIDs = GetSelectedModelGuids();
+            ToolUi.BeginCard("1) 查询目标");
             DrawSelectionArea();
+            ToolUi.EndCard();
 
-            EditorGUILayout.Space(8);
+            ToolUi.BeginCard("2) 材质导入");
             DrawMaterialImportSection();
+            ToolUi.EndCard();
+            ToolUi.BeginCard("3) 动画误差");
             DrawAnimationErrorSection();
+            ToolUi.EndCard();
+            ToolUi.BeginCard("4) Avatar");
             DrawAvatarSection();
+            ToolUi.EndCard();
 
-            EditorGUILayout.Space(10);
+            ToolUi.BeginCard("5) 执行");
             if (GUILayout.Button("应用"))
             {
                 ChangeImportMode();
             }
+            ToolUi.EndCard();
+            ToolUi.DrawStatus(statusMessage);
         }
 
         private void DrawSelectionArea()
@@ -128,12 +136,14 @@ namespace ToolSet
             if (selectedFBXGUIDs.Count == 0)
             {
                 Debug.LogWarning("未检测到可修改的模型资源。");
+                statusMessage = "未检测到可修改的模型资源";
                 return;
             }
 
             if (!applyMaterialImportMode && !applyAnimationError && !applyAvatarDefinition)
             {
                 Debug.LogWarning("请至少启用一个修改项。");
+                statusMessage = "请至少启用一个修改项";
                 return;
             }
 
@@ -204,6 +214,7 @@ namespace ToolSet
             }
 
             Debug.Log($"模型导入设置应用完成：已修改 {changedCount} 个，跳过 {skippedCount} 个。");
+            statusMessage = $"应用完成：已修改 {changedCount} 个，跳过 {skippedCount} 个";
         }
     }
     public enum ImportMode

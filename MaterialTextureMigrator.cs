@@ -18,6 +18,7 @@ namespace ToolSet
         private List<string> copiedTextures = new List<string>();
         private List<string> skippedTextures = new List<string>();
         private List<string> failedMaterials = new List<string>();
+        private string statusMessage = "等待操作";
         
         // 用于跟踪已处理的贴图UID和对应的复制路径
         private Dictionary<string, string> textureGuidToCopiedPath = new Dictionary<string, string>();
@@ -35,10 +36,9 @@ namespace ToolSet
     
         public void DrawGUI()
         {
-            EditorGUILayout.Space(10);
-            GUILayout.Label("材质贴图复制迁移工具", EditorStyles.boldLabel);
-            
-            EditorGUILayout.Space(10);
+            ToolUi.DrawToolHeader("材质贴图复制迁移工具", "从目标材质目录收集贴图并复制到输出目录，同时回写材质贴图引用。");
+
+            ToolUi.BeginCard("1) 输入输出");
             sourceMaterialsFolder = (DefaultAsset)EditorGUILayout.ObjectField(
                 "目标材质文件夹", 
                 sourceMaterialsFolder, 
@@ -52,7 +52,10 @@ namespace ToolSet
                 typeof(DefaultAsset), 
                 false
             );
-            if (GUILayout.Button("添加排除目录"))
+            ToolUi.EndCard();
+
+            ToolUi.BeginCard("2) 排除目录");
+            if (GUILayout.Button("添加排除目录", GUILayout.Width(120)))
             {
                 excludeFolders.Add(null);
             }
@@ -79,22 +82,21 @@ namespace ToolSet
                 EditorGUILayout.EndHorizontal();
             }
             EditorGUILayout.EndScrollView();
-            
-            
-            
-            EditorGUILayout.Space();
-            
-            if (GUILayout.Button("复制并迁移贴图"))
+            ToolUi.EndCard();
+
+            ToolUi.BeginCard("3) 执行");
+            if (GUILayout.Button("复制并迁移贴图", GUILayout.Height(28)))
             {
                 MigrateTextures();
             }
-            
-            EditorGUILayout.Space();
+            ToolUi.EndCard();
+
+            ToolUi.BeginCard("4) 结果");
             scrollPosition = EditorGUILayout.BeginScrollView(scrollPosition);
             
             if (processedMaterials.Count > 0 || skippedTextures.Count > 0 || failedMaterials.Count > 0)
             {
-                GUILayout.Label("Process Results:", EditorStyles.boldLabel);
+                GUILayout.Label("处理结果", EditorStyles.boldLabel);
                 
                 GUILayout.Label($"Processed Materials ({processedMaterials.Count}):");
                 foreach (var material in processedMaterials)
@@ -124,7 +126,7 @@ namespace ToolSet
                 }
                 
                 EditorGUILayout.Space();
-                if (GUILayout.Button("Clear Results"))
+                if (GUILayout.Button("清空结果"))
                 {
                     processedMaterials.Clear();
                     copiedTextures.Clear();
@@ -134,6 +136,8 @@ namespace ToolSet
             }
             
             EditorGUILayout.EndScrollView();
+            ToolUi.EndCard();
+            ToolUi.DrawStatus(statusMessage);
         }
     
         private void MigrateTextures()
@@ -151,6 +155,7 @@ namespace ToolSet
             {
                 Debug.LogError("Source is not a valid folder: " + sourcePath);
                 EditorUtility.DisplayDialog("Error", "Source is not a valid folder", "OK");
+                statusMessage = "源目录无效";
                 return;
             }
             
@@ -158,6 +163,7 @@ namespace ToolSet
             {
                 Debug.LogError("Target is not a valid folder: " + targetPath);
                 EditorUtility.DisplayDialog("Error", "Target is not a valid folder", "OK");
+                statusMessage = "输出目录无效";
                 return;
             }
             
@@ -183,6 +189,7 @@ namespace ToolSet
             {
                 Debug.LogWarning("No material files found in source folder");
                 EditorUtility.DisplayDialog("Info", "No material files found in source folder", "OK");
+                statusMessage = "未找到材质文件";
                 return;
             }
             
@@ -269,6 +276,7 @@ namespace ToolSet
             }
             
             Debug.Log($"Migration completed. Processed: {processedCount}, Errors: {errorCount}");
+            statusMessage = $"迁移完成：处理 {processedCount}，错误 {errorCount}";
             EditorUtility.DisplayDialog("Complete", $"Migration completed. Processed: {processedCount}, Errors: {errorCount}", "OK");
         }
     
