@@ -50,6 +50,8 @@ namespace ToolSet
         public string originalPath;
         public string guid;
         public string currentPath;
+        public string note;
+        public bool isDirectoryChanged;
         public DependencyState state;
         public List<string> referencedByRoots;
         public List<string> candidatePaths = new();
@@ -113,6 +115,8 @@ namespace ToolSet
         private bool repairOnlyJsonScope = true;
         private bool repairExpandRootDependencies = true;
         private readonly Dictionary<string, List<string>> rootDependencyScopeCache = new(StringComparer.OrdinalIgnoreCase);
+        private GUIStyle largeHintStyle;
+        private GUIStyle sectionTitleStyle;
         private static readonly HashSet<string> RepairSupportedExtensions = new(StringComparer.OrdinalIgnoreCase)
         {
             ".prefab", ".unity", ".mat", ".asset", ".controller", ".overrideController", ".anim", ".playable", ".guiskin"
@@ -125,8 +129,9 @@ namespace ToolSet
             EnsurePreferencesLoaded();
 
             EditorGUILayout.Space(8);
+            EnsureUiStyles();
             EditorGUILayout.LabelField("依赖记录工具", EditorStyles.largeLabel);
-            EditorGUILayout.HelpBox(
+            DrawLargeHint(
                 "推荐流程：\n" +
                 "① 选择目标资源/目录  ② 配置导出规则并保存 JSON  ③ 在目标工程解析 JSON 检查丢失依赖",
                 MessageType.Info);
@@ -137,7 +142,7 @@ namespace ToolSet
             DrawSectionCard("3) 解析检查与报告", ref parseFoldout, DrawParseSection);
 
             EditorGUILayout.Space(10);
-            EditorGUILayout.LabelField($"状态：{statusMessage}", EditorStyles.helpBox);
+            DrawLargeHint($"状态：{statusMessage}", MessageType.None);
         }
 
         private static void DrawSectionCard(string title, ref bool foldout, Action drawContent)
@@ -176,7 +181,7 @@ namespace ToolSet
             targetScroll = EditorGUILayout.BeginScrollView(targetScroll, GUILayout.Height(140));
             if (targets.Count == 0)
             {
-                EditorGUILayout.HelpBox("请拖入目录或资源对象，或点击“添加当前Selection”。", MessageType.None);
+                DrawLargeHint("请拖入目录或资源对象，或点击“添加当前Selection”。", MessageType.None);
             }
             else
             {
@@ -323,8 +328,9 @@ namespace ToolSet
             }
             repairOnlyJsonScope = EditorGUILayout.ToggleLeft("修复仅限 JSON 记录范围（推荐）", repairOnlyJsonScope);
             repairExpandRootDependencies = EditorGUILayout.ToggleLeft("修复时扩展扫描根对象依赖链", repairExpandRootDependencies);
+            DrawLargeHint("结果列表按卡片分组显示：每项包含状态、资源类型、基础信息、引用来源与候选修复区。", MessageType.None);
 
-            resultScroll = EditorGUILayout.BeginScrollView(resultScroll, GUILayout.Height(220));
+            resultScroll = EditorGUILayout.BeginScrollView(resultScroll, GUILayout.Height(320));
             foreach (DependencyCheckItem item in lastReport.items)
             {
                 if (onlyShowMissing && item.state != DependencyState.Missing)
@@ -339,44 +345,54 @@ namespace ToolSet
 
         private void DrawCheckItem(DependencyCheckItem item)
         {
-            MessageType messageType = item.state switch
-            {
-                DependencyState.Present => MessageType.Info,
-                DependencyState.Missing => MessageType.Error,
-                _ => MessageType.None
-            };
-
             string stateText = item.state switch
             {
                 DependencyState.Present => "已找到",
                 DependencyState.Missing => "引用丢失",
                 _ => "内建资源"
             };
+            string resourceType = GetResourceTypeLabel(item.originalPath, item.fileName);
+            bool warningDirectoryChanged = item.state == DependencyState.Present && item.isDirectoryChanged;
 
-            StringBuilder sb = new();
-            sb.AppendLine($"{stateText} | 原文件名：{item.fileName}");
-            sb.AppendLine($"原路径：{item.originalPath}");
+            EditorGUILayout.BeginVertical("box");
+
+            Rect accentRect = EditorGUILayout.GetControlRect(false, 4f);
+            EditorGUI.DrawRect(accentRect, GetItemAccentColor(item.state, warningDirectoryChanged));
+
+            EditorGUILayout.BeginHorizontal();
+            EditorGUILayout.LabelField($"[{stateText}] {item.fileName}", EditorStyles.boldLabel);
+            GUILayout.FlexibleSpace();
+            if (warningDirectoryChanged)
+            {
+                EditorGUILayout.LabelField("目录变化", sectionTitleStyle, GUILayout.Width(70));
+            }
+
+            EditorGUILayout.LabelField($"类型: {resourceType}", EditorStyles.miniBoldLabel, GUILayout.Width(170));
+            EditorGUILayout.EndHorizontal();
+
+            DrawInfoRow("原路径", item.originalPath);
             if (!string.IsNullOrEmpty(item.guid))
             {
-                sb.AppendLine($"GUID：{item.guid}");
+                DrawInfoRow("GUID", item.guid);
             }
 
             if (item.state == DependencyState.Present)
             {
-                sb.AppendLine($"当前路径：{item.currentPath}");
+                DrawInfoRow("当前路径", item.currentPath);
+                if (item.isDirectoryChanged)
+                {
+                    DrawInfoRow("提示", "引用已找到，但目录与记录不一致。");
+                }
             }
-
-            if (item.referencedByRoots != null && item.referencedByRoots.Count > 0)
+            else if (!string.IsNullOrWhiteSpace(item.note))
             {
-                string roots = string.Join(", ", item.referencedByRoots);
-                sb.AppendLine($"被以下根对象引用：{roots}");
+                DrawInfoRow("说明", item.note);
             }
-
-            EditorGUILayout.HelpBox(sb.ToString(), messageType);
+            DrawSeparator();
 
             if (item.state == DependencyState.Missing && item.referencedByRoots != null && item.referencedByRoots.Count > 0)
             {
-                EditorGUILayout.LabelField("引用来源对象（可跳转）:");
+                EditorGUILayout.LabelField("引用来源对象", EditorStyles.miniBoldLabel);
                 for (int i = 0; i < item.referencedByRoots.Count; i++)
                 {
                     string rootPath = item.referencedByRoots[i];
@@ -390,10 +406,15 @@ namespace ToolSet
                     }
                 }
             }
+            else
+            {
+                EditorGUILayout.LabelField("引用来源对象: -", EditorStyles.miniLabel);
+            }
+            DrawSeparator();
 
             if (item.state == DependencyState.Missing && item.candidatePaths != null && item.candidatePaths.Count > 0)
             {
-                EditorGUILayout.LabelField("候选资源（可定位）:");
+                EditorGUILayout.LabelField("候选资源（可定位 / 可修复）", EditorStyles.miniBoldLabel);
                 foreach (string candidate in item.candidatePaths)
                 {
                     using (new EditorGUILayout.HorizontalScope())
@@ -411,6 +432,113 @@ namespace ToolSet
                     }
                 }
             }
+            else if (item.state == DependencyState.Missing)
+            {
+                EditorGUILayout.LabelField("候选资源: 尚未搜索", EditorStyles.miniLabel);
+            }
+
+            EditorGUILayout.EndVertical();
+            EditorGUILayout.Space(4);
+            DrawSeparator();
+        }
+
+        private static void DrawInfoRow(string label, string value)
+        {
+            using (new EditorGUILayout.HorizontalScope())
+            {
+                EditorGUILayout.LabelField(label, EditorStyles.miniBoldLabel, GUILayout.Width(64));
+                EditorGUILayout.SelectableLabel(string.IsNullOrEmpty(value) ? "-" : value, GUILayout.Height(EditorGUIUtility.singleLineHeight));
+            }
+        }
+
+        private void EnsureUiStyles()
+        {
+            if (largeHintStyle == null)
+            {
+                largeHintStyle = new GUIStyle(EditorStyles.helpBox)
+                {
+                    fontSize = 12,
+                    wordWrap = true,
+                    richText = true,
+                    padding = new RectOffset(10, 10, 8, 8)
+                };
+            }
+
+            if (sectionTitleStyle == null)
+            {
+                sectionTitleStyle = new GUIStyle(EditorStyles.miniBoldLabel)
+                {
+                    normal = { textColor = new Color(0.95f, 0.72f, 0.16f, 1f) },
+                    fontSize = 11
+                };
+            }
+        }
+
+        private void DrawLargeHint(string message, MessageType messageType)
+        {
+            EnsureUiStyles();
+            Color oldColor = GUI.color;
+            GUI.color = messageType switch
+            {
+                MessageType.Error => new Color(1f, 0.88f, 0.88f, 1f),
+                MessageType.Warning => new Color(1f, 0.96f, 0.82f, 1f),
+                MessageType.Info => new Color(0.86f, 0.93f, 1f, 1f),
+                _ => new Color(0.92f, 0.92f, 0.92f, 1f)
+            };
+            EditorGUILayout.LabelField(message, largeHintStyle);
+            GUI.color = oldColor;
+        }
+
+        private static Color GetItemAccentColor(DependencyState state, bool warningDirectoryChanged)
+        {
+            if (state == DependencyState.Missing)
+            {
+                return new Color(0.86f, 0.24f, 0.24f, 1f); // 红色：引用丢失
+            }
+
+            if (warningDirectoryChanged)
+            {
+                return new Color(0.95f, 0.72f, 0.16f, 1f); // 黄色：目录变更
+            }
+
+            if (state == DependencyState.Present)
+            {
+                return new Color(0.23f, 0.66f, 0.33f, 1f);
+            }
+
+            return new Color(0.5f, 0.5f, 0.5f, 1f);
+        }
+
+        private static void DrawSeparator()
+        {
+            Rect rect = EditorGUILayout.GetControlRect(false, 1f);
+            EditorGUI.DrawRect(rect, new Color(0.3f, 0.3f, 0.3f, 0.6f));
+        }
+
+        private static string GetResourceTypeLabel(string path, string fileName)
+        {
+            string extension = Path.GetExtension(path);
+            if (string.IsNullOrEmpty(extension))
+            {
+                extension = Path.GetExtension(fileName);
+            }
+
+            extension = extension?.ToLowerInvariant() ?? string.Empty;
+            return extension switch
+            {
+                ".prefab" => "Prefab",
+                ".mat" => "Material",
+                ".png" or ".jpg" or ".jpeg" or ".tga" or ".psd" or ".exr" => "Texture",
+                ".fbx" => "Model",
+                ".anim" => "AnimationClip",
+                ".controller" => "AnimatorController",
+                ".overridecontroller" => "AnimatorOverrideController",
+                ".playable" => "Timeline",
+                ".shader" => "Shader",
+                ".asset" => "ScriptableAsset",
+                ".unity" => "Scene",
+                _ => string.IsNullOrEmpty(extension) ? "Unknown" : extension.TrimStart('.').ToUpperInvariant()
+            };
         }
 
         private void AddFromSelection()
@@ -817,6 +945,8 @@ namespace ToolSet
                     fileName = string.IsNullOrEmpty(dep.fileName) ? Path.GetFileName(dep.path) : dep.fileName,
                     originalPath = dep.path,
                     guid = dep.guid,
+                    note = string.Empty,
+                    isDirectoryChanged = false,
                     referencedByRoots = dep.referencedByRoots ?? new List<string>()
                 };
 
@@ -826,9 +956,12 @@ namespace ToolSet
                 }
                 else
                 {
-                    string currentPath = FindAssetPath(dep);
+                    string currentPath = FindAssetPathStrictByGuid(dep, out string note);
                     item.currentPath = currentPath;
+                    item.note = note;
                     item.state = string.IsNullOrEmpty(currentPath) ? DependencyState.Missing : DependencyState.Present;
+                    item.isDirectoryChanged = item.state == DependencyState.Present &&
+                                              !IsSameDirectory(dep.path, currentPath);
                 }
 
                 report.items.Add(item);
@@ -846,8 +979,9 @@ namespace ToolSet
             return report;
         }
 
-        private static string FindAssetPath(DependencyRecordItem dep)
+        private static string FindAssetPathStrictByGuid(DependencyRecordItem dep, out string note)
         {
+            note = string.Empty;
             if (!string.IsNullOrEmpty(dep.guid))
             {
                 string pathByGuid = AssetDatabase.GUIDToAssetPath(dep.guid);
@@ -855,14 +989,39 @@ namespace ToolSet
                 {
                     return pathByGuid;
                 }
+
+                if (!string.IsNullOrEmpty(dep.path) && AssetDatabase.LoadMainAssetAtPath(dep.path) != null)
+                {
+                    note = "检测到同路径资源，但GUID不一致（引用仍会丢失）。";
+                }
+
+                return string.Empty;
             }
 
+            // 历史记录若没有 GUID，才退化为路径存在性判断
             if (!string.IsNullOrEmpty(dep.path) && AssetDatabase.LoadMainAssetAtPath(dep.path) != null)
             {
                 return dep.path;
             }
 
             return string.Empty;
+        }
+
+        private static bool IsSameDirectory(string pathA, string pathB)
+        {
+            string dirA = NormalizePath(Path.GetDirectoryName(pathA));
+            string dirB = NormalizePath(Path.GetDirectoryName(pathB));
+            return string.Equals(dirA, dirB, StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static string NormalizePath(string path)
+        {
+            if (string.IsNullOrWhiteSpace(path))
+            {
+                return string.Empty;
+            }
+
+            return path.Replace('\\', '/').TrimEnd('/');
         }
 
         private static bool IsBuiltInDependency(string depPath, string guid)
