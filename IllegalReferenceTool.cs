@@ -16,7 +16,7 @@ namespace ToolSet
         private readonly List<DefaultAsset> excludeFolders = new();
         private readonly List<IllegalReferenceItem> results = new();
 
-        private string excludeExtensionsInput = ".cs,.js,.dll,.asmdef,.asmref";
+        private string excludeExtensionsInput = ".cs,.js,.dll,.asmdef,.asmref,.shader";
         private bool excludeEditorScripts = true;
         private DefaultAsset replaceCopyTargetFolder;
         private string statusMessage = "等待查询";
@@ -59,10 +59,10 @@ namespace ToolSet
             EnsureUiStyles();
 
             ToolUi.DrawToolHeader("非法引用查询工具",
-                "用途：在指定查询对象中扫描“命中排除规则”的依赖引用，支持定位、候选替换、删除引用（GUID置空）、复制并替换。");
+                "用途：在指定查询对象中扫描“越界依赖引用”，可通过排除规则忽略目录/类型，支持定位、候选替换、删除引用（GUID置空）、复制并替换。");
 
             ToolUi.DrawFoldoutCard("1) 查询对象", ref targetFoldout, DrawTargetSection);
-            ToolUi.DrawFoldoutCard("2) 非法规则（排除目录/类型）", ref ruleFoldout, DrawRuleSection);
+            ToolUi.DrawFoldoutCard("2) 忽略规则（排除目录/类型）", ref ruleFoldout, DrawRuleSection);
             ToolUi.DrawFoldoutCard("3) 查询结果与处理", ref resultFoldout, DrawResultSection);
 
             EditorGUILayout.Space(8);
@@ -342,7 +342,7 @@ namespace ToolSet
                         continue;
                     }
 
-                    if (!IsIllegalDependency(depPath, excludedExtensions, excludedFolderPaths))
+                    if (ShouldExcludeDependency(depPath, excludedExtensions, excludedFolderPaths))
                     {
                         continue;
                     }
@@ -431,11 +431,11 @@ namespace ToolSet
             return entry;
         }
 
-        private bool IsIllegalDependency(string depPath, HashSet<string> excludedExtensions, List<string> excludedFolderPaths)
+        private bool ShouldExcludeDependency(string depPath, HashSet<string> excludedExtensions, List<string> excludedFolderPaths)
         {
             if (string.IsNullOrWhiteSpace(depPath))
             {
-                return false;
+                return true;
             }
 
             if (excludeEditorScripts && depPath.IndexOf("/Editor/", StringComparison.OrdinalIgnoreCase) >= 0)
@@ -470,7 +470,7 @@ namespace ToolSet
                 return result;
             }
 
-            string[] parts = excludeExtensionsInput.Split(new[] { ',', ';', '|', ' ' }, StringSplitOptions.RemoveEmptyEntries);
+            string[] parts = excludeExtensionsInput.Split(new[] { ',', '，', ';', '；', '|', ' ', '\t', '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
             foreach (string part in parts)
             {
                 string ext = part.Trim();
