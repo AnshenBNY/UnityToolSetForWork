@@ -110,6 +110,10 @@ namespace ToolSet
         private bool enableVerboseLog = false;
         /// <summary>是否输出分步骤耗时统计</summary>
         private bool enableStepTimingLog = true;
+        /// <summary>是否启用延迟资产操作优化（仅影响工具执行期间）</summary>
+        private bool enableDeferredAssetOps = true;
+        /// <summary>是否延迟中间阶段的 AssetDatabase 操作（统一在流程末尾执行）</summary>
+        private bool deferAssetDatabaseOperations = false;
 
         #endregion
     
@@ -155,6 +159,9 @@ namespace ToolSet
             outputFolder = EditorGUILayout.ObjectField("输出文件夹：", outputFolder, typeof(DefaultAsset), false) as DefaultAsset;
             enableVerboseLog = EditorGUILayout.ToggleLeft("启用详细日志（可能影响执行速度）", enableVerboseLog);
             enableStepTimingLog = EditorGUILayout.ToggleLeft("启用分步骤耗时统计", enableStepTimingLog);
+            enableDeferredAssetOps = EditorGUILayout.ToggleLeft(
+                "启用延迟资产操作优化（减少中途 Refresh/Save，通常更快）",
+                enableDeferredAssetOps);
             if (GUILayout.Button("添加排除目录"))
             {
                 excludeFolders.Add(null);
@@ -224,13 +231,16 @@ namespace ToolSet
                     EditorGUILayout.EndVertical();
                     return;
                 }
-                newFolderPath = GetStepOutputPath(SubDirPrefabs);
-                AssetDatabase.Refresh();
+                ExecuteStepWithOptionalDeferredAssetOps(() =>
+                {
+                    newFolderPath = GetStepOutputPath(SubDirPrefabs);
+                    RefreshAssetDatabaseIfNeeded();
     
-                rootPrefab = ExecuteWithStepTiming("分步-复制预制体", () => CopyRootPrefab());
-                //flagPrefab = true;
+                    rootPrefab = ExecuteWithStepTiming("分步-复制预制体", () => CopyRootPrefab());
+                    //flagPrefab = true;
                 
-                currentStatus = "预制体复制完成";
+                    currentStatus = "预制体复制完成";
+                });
             }
             
             EditorGUILayout.Space();
@@ -257,10 +267,13 @@ namespace ToolSet
                     EditorGUILayout.EndVertical();
                     return;
                 }
-                materialsCopyPath = GetStepOutputPath(SubDirMaterials);
-                ExecuteWithStepTiming("分步-复制材质", () => CopyMaterialsFromMeshRender(rootPrefab));
-                //flagMaterial = true;
-                currentStatus = "材质复制完成";
+                ExecuteStepWithOptionalDeferredAssetOps(() =>
+                {
+                    materialsCopyPath = GetStepOutputPath(SubDirMaterials);
+                    ExecuteWithStepTiming("分步-复制材质", () => CopyMaterialsFromMeshRender(rootPrefab));
+                    //flagMaterial = true;
+                    currentStatus = "材质复制完成";
+                });
             }
     
             EditorGUILayout.Space();
@@ -290,10 +303,13 @@ namespace ToolSet
                     EditorGUILayout.EndVertical();
                     return;
                 }
-                FxMaterialsCopyPath = GetStepOutputPath(SubDirFxMaterials);
-                ExecuteWithStepTiming("分步-复制粒子材质", () => CopyMaterialsFromParticle(rootPrefab));
-                //flagMesh = true;
-                currentStatus = "粒子材质复制完成";
+                ExecuteStepWithOptionalDeferredAssetOps(() =>
+                {
+                    FxMaterialsCopyPath = GetStepOutputPath(SubDirFxMaterials);
+                    ExecuteWithStepTiming("分步-复制粒子材质", () => CopyMaterialsFromParticle(rootPrefab));
+                    //flagMesh = true;
+                    currentStatus = "粒子材质复制完成";
+                });
             }
             EditorGUILayout.Space();
     
@@ -322,9 +338,12 @@ namespace ToolSet
                     EditorGUILayout.EndVertical();
                     return;
                 }
-                FxModelCopyPath = GetStepOutputPath(SubDirMeshes);
-                ExecuteWithStepTiming("分步-复制粒子网格", () => CopyMeshFromParticle(rootPrefab));
-                currentStatus = "粒子网格复制完成";
+                ExecuteStepWithOptionalDeferredAssetOps(() =>
+                {
+                    FxModelCopyPath = GetStepOutputPath(SubDirMeshes);
+                    ExecuteWithStepTiming("分步-复制粒子网格", () => CopyMeshFromParticle(rootPrefab));
+                    currentStatus = "粒子网格复制完成";
+                });
             }
 
             EditorGUILayout.Space();
@@ -353,10 +372,13 @@ namespace ToolSet
                     return;
                 }
 
-                imageTextCopyPath = GetStepOutputPath(SubDirImageText);
-                LogVerbose($"[ImageText资源] 点击按钮，开始处理: {rootPrefab.name}");
-                currentStatus = ExecuteWithStepTiming("分步-复制Image/Text资源", () => CopyImageAndTextResources(rootPrefab));
-                LogVerbose($"[ImageText资源] {currentStatus}");
+                ExecuteStepWithOptionalDeferredAssetOps(() =>
+                {
+                    imageTextCopyPath = GetStepOutputPath(SubDirImageText);
+                    LogVerbose($"[ImageText资源] 点击按钮，开始处理: {rootPrefab.name}");
+                    currentStatus = ExecuteWithStepTiming("分步-复制Image/Text资源", () => CopyImageAndTextResources(rootPrefab));
+                    LogVerbose($"[ImageText资源] {currentStatus}");
+                });
             }
 
             EditorGUILayout.Space();
@@ -385,11 +407,14 @@ namespace ToolSet
                     return;
                 }
 
-                string outputPath = AssetDatabase.GetAssetPath(outputFolder);
-                textureMaterialSourcePath = outputPath;
-                texturesCopyPath = GetStepOutputPath(SubDirTextures);
-                currentStatus = ExecuteWithStepTiming("分步-复制材质贴图",
-                    () => CopyTexturesFromMaterials(textureMaterialSourcePath, texturesCopyPath));
+                ExecuteStepWithOptionalDeferredAssetOps(() =>
+                {
+                    string outputPath = AssetDatabase.GetAssetPath(outputFolder);
+                    textureMaterialSourcePath = outputPath;
+                    texturesCopyPath = GetStepOutputPath(SubDirTextures);
+                    currentStatus = ExecuteWithStepTiming("分步-复制材质贴图",
+                        () => CopyTexturesFromMaterials(textureMaterialSourcePath, texturesCopyPath));
+                });
             }
 
             EditorGUILayout.Space();
@@ -417,9 +442,12 @@ namespace ToolSet
                     EditorGUILayout.EndVertical();
                     return;
                 }
-                FxModelCopyPath = GetStepOutputPath(SubDirMeshes);
-                ExecuteWithStepTiming("分步-复制 MeshFilter 网格", () => CopyMeshFromMeshFilter(rootPrefab));
-                currentStatus = "MeshFilter 网格复制完成";
+                ExecuteStepWithOptionalDeferredAssetOps(() =>
+                {
+                    FxModelCopyPath = GetStepOutputPath(SubDirMeshes);
+                    ExecuteWithStepTiming("分步-复制 MeshFilter 网格", () => CopyMeshFromMeshFilter(rootPrefab));
+                    currentStatus = "MeshFilter 网格复制完成";
+                });
             }
 
             EditorGUILayout.Space();
@@ -447,9 +475,12 @@ namespace ToolSet
                     EditorGUILayout.EndVertical();
                     return;
                 }
-                animationCopyPath = GetStepOutputPath(SubDirAnimations);
-                ExecuteWithStepTiming("分步-复制动画 Timeline", () => CopyAnimationAndTimeline(rootPrefab));
-                currentStatus = "动画 Timeline 复制完成";
+                ExecuteStepWithOptionalDeferredAssetOps(() =>
+                {
+                    animationCopyPath = GetStepOutputPath(SubDirAnimations);
+                    ExecuteWithStepTiming("分步-复制动画 Timeline", () => CopyAnimationAndTimeline(rootPrefab));
+                    currentStatus = "动画 Timeline 复制完成";
+                });
             }
 
             EditorGUILayout.EndVertical();
@@ -557,7 +588,76 @@ namespace ToolSet
                 Debug.Log($"[耗时] {stepName}: {stopwatch.ElapsedMilliseconds} ms");
             }
         }
-        
+
+        /// <summary>
+        /// 按当前执行模式执行 Refresh：分步操作即时刷新；一键流程延后到末尾统一刷新。
+        /// </summary>
+        private void RefreshAssetDatabaseIfNeeded()
+        {
+            if (deferAssetDatabaseOperations) return;
+            AssetDatabase.Refresh();
+        }
+
+        /// <summary>
+        /// 按当前执行模式执行 SaveAssets：分步操作即时保存；一键流程延后到末尾统一保存。
+        /// </summary>
+        private void SaveAssetsIfNeeded()
+        {
+            if (deferAssetDatabaseOperations) return;
+            AssetDatabase.SaveAssets();
+        }
+
+        /// <summary>
+        /// 执行阶段临时关闭自动刷新，并在结束时统一保存+刷新一次。
+        /// </summary>
+        private T ExecuteWithDeferredAssetDatabaseOperations<T>(System.Func<T> action)
+        {
+            if (action == null) return default(T);
+            if (!enableDeferredAssetOps) return action();
+
+            bool alreadyDeferred = deferAssetDatabaseOperations;
+            if (!alreadyDeferred)
+            {
+                AssetDatabase.DisallowAutoRefresh();
+                deferAssetDatabaseOperations = true;
+            }
+
+            try
+            {
+                return action();
+            }
+            finally
+            {
+                if (!alreadyDeferred)
+                {
+                    deferAssetDatabaseOperations = false;
+                    AssetDatabase.AllowAutoRefresh();
+                    AssetDatabase.SaveAssets();
+                    AssetDatabase.Refresh();
+                }
+            }
+        }
+
+        /// <summary>
+        /// 分步按钮入口：按开关决定是否启用延迟资产操作优化。
+        /// </summary>
+        private void ExecuteStepWithOptionalDeferredAssetOps(System.Action action)
+        {
+            if (action == null) return;
+
+            if (!enableDeferredAssetOps)
+            {
+                action();
+                return;
+            }
+
+            ExecuteWithDeferredAssetDatabaseOperations(() =>
+            {
+                action();
+                return true;
+            });
+        }
+
         #endregion
 
         #region 一键复制
@@ -596,7 +696,11 @@ namespace ToolSet
                 return false;
             }
 
-            ApplyModificationsRecursively(rootPrefab.transform);
+            ExecuteWithDeferredAssetDatabaseOperations(() =>
+            {
+                ApplyModificationsRecursively(rootPrefab.transform);
+                return true;
+            });
             currentStatus = "保存成功";
             if (showSuccessDialog)
             {
@@ -641,31 +745,34 @@ namespace ToolSet
 
             try
             {
-                AssetDatabase.Refresh();
-                rootPrefab = ExecuteWithStepTiming("一键-复制预制体", () => CopyRootPrefab());
-                if (rootPrefab == null)
+                return ExecuteWithDeferredAssetDatabaseOperations(() =>
                 {
-                    currentStatus = "一键复制失败：预制体复制未成功";
-                    return false;
-                }
+                    RefreshAssetDatabaseIfNeeded();
+                    rootPrefab = ExecuteWithStepTiming("一键-复制预制体", () => CopyRootPrefab());
+                    if (rootPrefab == null)
+                    {
+                        currentStatus = "一键复制失败：预制体复制未成功";
+                        return false;
+                    }
 
-                ExecuteWithStepTiming("一键-复制材质", () => CopyMaterialsFromMeshRender(rootPrefab));
-                ExecuteWithStepTiming("一键-复制粒子材质", () => CopyMaterialsFromParticle(rootPrefab));
-                ExecuteWithStepTiming("一键-复制粒子网格", () => CopyMeshFromParticle(rootPrefab));
-                string imageTextStatus = ExecuteWithStepTiming("一键-复制Image/Text资源", () => CopyImageAndTextResources(rootPrefab));
-                LogVerbose($"[一键复制] {imageTextStatus}");
-                string textureStatus = ExecuteWithStepTiming("一键-复制材质贴图",
-                    () => CopyTexturesFromMaterials(textureMaterialSourcePath, texturesCopyPath));
-                LogVerbose($"[一键复制] {textureStatus}");
-                ExecuteWithStepTiming("一键-复制 MeshFilter 网格", () => CopyMeshFromMeshFilter(rootPrefab));
-                ExecuteWithStepTiming("一键-复制动画 Timeline", () => CopyAnimationAndTimeline(rootPrefab));
+                    ExecuteWithStepTiming("一键-复制材质", () => CopyMaterialsFromMeshRender(rootPrefab));
+                    ExecuteWithStepTiming("一键-复制粒子材质", () => CopyMaterialsFromParticle(rootPrefab));
+                    ExecuteWithStepTiming("一键-复制粒子网格", () => CopyMeshFromParticle(rootPrefab));
+                    string imageTextStatus = ExecuteWithStepTiming("一键-复制Image/Text资源", () => CopyImageAndTextResources(rootPrefab));
+                    LogVerbose($"[一键复制] {imageTextStatus}");
+                    string textureStatus = ExecuteWithStepTiming("一键-复制材质贴图",
+                        () => CopyTexturesFromMaterials(textureMaterialSourcePath, texturesCopyPath));
+                    LogVerbose($"[一键复制] {textureStatus}");
+                    ExecuteWithStepTiming("一键-复制 MeshFilter 网格", () => CopyMeshFromMeshFilter(rootPrefab));
+                    ExecuteWithStepTiming("一键-复制动画 Timeline", () => CopyAnimationAndTimeline(rootPrefab));
 
-                currentStatus = "一键复制全部完成";
-                if (showSuccessDialog)
-                {
-                    EditorUtility.DisplayDialog("", "一键复制全部完成!", "确定");
-                }
-                return true;
+                    currentStatus = "一键复制全部完成";
+                    if (showSuccessDialog)
+                    {
+                        EditorUtility.DisplayDialog("", "一键复制全部完成!", "确定");
+                    }
+                    return true;
+                });
             }
             catch (System.Exception ex)
             {
@@ -727,7 +834,7 @@ namespace ToolSet
             }
 
             AssetDatabase.CreateFolder(parentPath, folderName);
-            AssetDatabase.Refresh();
+            RefreshAssetDatabaseIfNeeded();
             return targetPath;
         }
 
@@ -769,7 +876,7 @@ namespace ToolSet
             {
                 rootPrefabCopy = (GameObject)AssetDatabase.LoadAssetAtPath(rootPrefabCopyPath, typeof(GameObject));
             }
-            AssetDatabase.Refresh();
+            RefreshAssetDatabaseIfNeeded();
             return (GameObject)PrefabUtility.InstantiatePrefab(rootPrefabCopy);
         }
         
@@ -787,7 +894,7 @@ namespace ToolSet
         {
             // 存储原始GUID到复制后GUID的映射关系
             Dictionary<string, string> prefabUIDs = new Dictionary<string, string>();
-            AssetDatabase.Refresh();
+            RefreshAssetDatabaseIfNeeded();
 
             List<string> excludePaths = BuildExcludePaths("预制体复制");
 
@@ -843,7 +950,7 @@ namespace ToolSet
                     }
                 }
                 copyPath = ReplaceUID(prefabRoot, prefabUIDs);
-                AssetDatabase.Refresh();
+                RefreshAssetDatabaseIfNeeded();
     
     
             }
@@ -880,7 +987,7 @@ namespace ToolSet
             {
                 CopyMaterialFromRenderer(meshRenderers, materialsCopyPath, sourceMatIDs, copiedMatCache, excludePaths, "材质复制");
                 CopyMaterialFromRenderer(skinnedMeshRenderers, materialsCopyPath, sourceMatIDs, copiedMatCache, excludePaths, "材质复制");
-                AssetDatabase.Refresh();
+                RefreshAssetDatabaseIfNeeded();
     
                 //应用预制体中的修改
                 //ApplyModificationsRecursively (instance.transform);
@@ -1058,7 +1165,7 @@ namespace ToolSet
                 }
             }
 
-            AssetDatabase.Refresh();
+            RefreshAssetDatabaseIfNeeded();
             LogVerbose($"[ImageText资源] Image 数量: {images.Length}, Text 数量: {texts.Length}");
             return true;
         }
@@ -1161,7 +1268,7 @@ namespace ToolSet
                     CopyTextureTasksInBatches(textureCopyTasks, ref copiedTextureCount, ref failedTextureCount);
                 }
 
-                AssetDatabase.Refresh();
+                RefreshAssetDatabaseIfNeeded();
 
                 // 阶段3：回写材质贴图引用
                 for (int i = 0; i < materialPaths.Count; i++)
@@ -1201,8 +1308,8 @@ namespace ToolSet
             }
             finally
             {
-                AssetDatabase.SaveAssets();
-                AssetDatabase.Refresh();
+                SaveAssetsIfNeeded();
+                RefreshAssetDatabaseIfNeeded();
                 EditorUtility.ClearProgressBar();
             }
 
@@ -1482,11 +1589,15 @@ namespace ToolSet
             {
                 int batchEnd = Mathf.Min(batchStart + batchSize, totalCount);
                 bool startedAssetEditing = false;
+                bool useBatchAssetEditing = !deferAssetDatabaseOperations;
 
                 try
                 {
-                    AssetDatabase.StartAssetEditing();
-                    startedAssetEditing = true;
+                    if (useBatchAssetEditing)
+                    {
+                        AssetDatabase.StartAssetEditing();
+                        startedAssetEditing = true;
+                    }
 
                     for (int i = batchStart; i < batchEnd; i++)
                     {
@@ -1696,7 +1807,7 @@ namespace ToolSet
                     CopyAndReplaceRendererMaterials(trailRenderer, FxMaterialsCopyPath, sourceMatIDs, copiedMatCache, excludePaths, "Trail材质");
                 }
 
-                AssetDatabase.Refresh();
+                RefreshAssetDatabaseIfNeeded();
             }
             finally
             {
@@ -2017,7 +2128,7 @@ namespace ToolSet
                   
                 }
                 
-                AssetDatabase.Refresh();
+                RefreshAssetDatabaseIfNeeded();
             }
             finally
             {
@@ -2095,7 +2206,7 @@ namespace ToolSet
 
                 }
 
-                AssetDatabase.Refresh();
+                RefreshAssetDatabaseIfNeeded();
 
                 if (skippedModelPrefab > 0)
                 {
@@ -2233,7 +2344,7 @@ namespace ToolSet
                     ReplaceGuidReferencesInFile(copiedYamlPath, guidMap);
                 }
 
-                AssetDatabase.Refresh();
+                RefreshAssetDatabaseIfNeeded();
                 EditorUtility.DisplayProgressBar("处理中", "正在更新组件引用...", 0.95f);
                 foreach (Animator animator in animators)
                 {
@@ -2245,7 +2356,7 @@ namespace ToolSet
                     ReplacePlayableDirectorReference(director, sourcePathToCopyPath, instance);
                 }
 
-                AssetDatabase.Refresh();
+                RefreshAssetDatabaseIfNeeded();
                 LogVerbose($"[动画Timeline] 处理完成: Animator {animators.Length} 个, PlayableDirector {directors.Length} 个, " +
                           $"Controller {animatorControllers.Count} 个, Timeline/Playable {playableAssets.Count} 个, " +
                           $"复制资源 {copiedAssetIDs.Count} 个");
@@ -2548,6 +2659,7 @@ namespace ToolSet
             }
 
             File.WriteAllLines(fullPath, replaceContent);
+            AssetDatabase.ImportAsset(assetPath, ImportAssetOptions.ForceSynchronousImport);
         }
 
         /// <summary>
@@ -3277,7 +3389,7 @@ namespace ToolSet
             {
                 
                 File.WriteAllLines(copyFilePath, content);
-                AssetDatabase.Refresh();
+                AssetDatabase.ImportAsset(copyFilePath, ImportAssetOptions.ForceSynchronousImport);
                 return copyFilePath;
             }
             else
@@ -3301,7 +3413,7 @@ namespace ToolSet
                 File.WriteAllLines(copyFilePath, replaceContent);
             }
     
-            AssetDatabase.Refresh();
+            AssetDatabase.ImportAsset(copyFilePath, ImportAssetOptions.ForceSynchronousImport);
             return copyFilePath;
         }
         
