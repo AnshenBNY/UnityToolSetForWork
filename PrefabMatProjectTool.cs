@@ -1,264 +1,130 @@
 using System;
-using System.Collections;
 using System.Collections.Generic;
-using UnityEngine;
+using System.Linq;
 using UnityEditor;
+using UnityEditor.SceneManagement;
+using UnityEngine;
 
 namespace ToolSet
 {
-    public class PrefabMatProjectTool : EditorWindow ,IToolGUI
+    public class PrefabMatProjectTool : ToolPanel
     {
-        
-        private GameObject source;
-        private GameObject target;
-    
-        private GameObject source_skin;
-        private GameObject target_skin;
-        // private List<GameObject> fxPrefabs;
-        // private List<string> fxPaths;
-        private Dictionary<GameObject,string> fxPrefabs;
-        private Dictionary<Material[], string> skinMats;
-    
-        private bool fxToggle = true;
-        private bool matToggle = false;
-        private string statusMessage = "等待操作";
-        // [MenuItem("BjTools/预制体&材质映射工具")]
-        // public static void ShowWindow()
-        // {
-        //     GetWindow<PrefabMatProjectTool>("预制体&材质映射工具");
-        // }
-    
-        public void DrawGUI() 
+        GameObject source, target;
+        bool fxToggle = true, matToggle;
+        public override void DrawGUI()
         {
-            ToolUi.DrawToolHeader("预制体&材质映射工具", "按源节点映射到目标节点，可独立选择预制体映射与材质映射。");
-
-            ToolUi.BeginCard("1) 输入对象");
-            EditorGUILayout.LabelField("源根节点：");
-            source = EditorGUILayout.ObjectField(source, typeof(GameObject)) as GameObject;
-            EditorGUILayout.LabelField("目标根节点：");
-            target = EditorGUILayout.ObjectField(target, typeof(GameObject)) as GameObject;
-            ToolUi.EndCard();
-
-            ToolUi.BeginCard("2) 映射选项");
-            fxToggle = EditorGUILayout.ToggleLeft("预制体映射", fxToggle);
-            matToggle = EditorGUILayout.ToggleLeft("材质映射", matToggle);
-            EditorGUILayout.HelpBox("注意：预制体映射会解包源根节点中的父级预制体实例。", MessageType.Warning);
-            ToolUi.EndCard();
-
-            ToolUi.BeginCard("3) 执行");
-            if (GUILayout.Button("运行", GUILayout.Height(28)))
-            {
-                Run();
-            }
-            ToolUi.EndCard();
-            ToolUi.DrawStatus(statusMessage);
+            ToolUi.DrawToolHeader("预制体与材质映射", "按相对节点路径映射，源对象保持原样。目标必须是场景对象，修改支持 Undo。");
+            source = (GameObject)EditorGUILayout.ObjectField("源根节点", source, typeof(GameObject), true);
+            target = (GameObject)EditorGUILayout.ObjectField("目标根节点", target, typeof(GameObject), true);
+            fxToggle = EditorGUILayout.ToggleLeft("复制嵌套特效预制体", fxToggle);
+            matToggle = EditorGUILayout.ToggleLeft("映射所有 Renderer 的材质（包含根节点）", matToggle);
+            EditorGUILayout.HelpBox("目标已有同名特效节点时跳过；重名路径、缺失节点和无法保留的结构覆盖会在预览中列出。", MessageType.Info);
+            if (GUILayout.Button("预览映射", GUILayout.Height(30))) ToolWorkflow.Preview(BuildPlan);
         }
-    
-        private void Run()
+        static string Relative(Transform root, Transform node)
         {
-            
-            if (source == null)
+            if (node == root) return "";
+            var parts = new List<string>();
+            while (node != null && node != root) { parts.Add(node.name); node = node.parent; }
+            if (node == null) throw new InvalidOperationException("节点不在源根节点下。");
+            parts.Reverse(); return string.Join("/", parts);
+        }
+        internal static Transform FindUnique(Transform root, string path)
+        {
+            foreach (string part in path.Split(new[] { '/' }, StringSplitOptions.RemoveEmptyEntries))
             {
-                Debug.LogError("未选择源根节点！");
-                statusMessage = "未选择源根节点";
-                return;
+                var found = root.Cast<Transform>().Where(t => t.name == part).ToArray();
+                if (found.Length != 1) throw new InvalidOperationException("路径缺失或存在重名节点：" + path);
+                root = found[0];
             }
-            if (target == null)
+            return root;
+        }
+        internal ToolPlan BuildPlan()
+        {
+            if (source == null || target == null || source == target || EditorUtility.IsPersistent(target) || !target.scene.IsValid())
+                throw new InvalidOperationException("请选择不同的源对象和有效的目标场景对象。");
+            if (target.transform.IsChildOf(source.transform) || source.transform.IsChildOf(target.transform))
+                throw new InvalidOperationException("源和目标不能互为父子节点。");
+            var plan = new ToolPlan { title = "预制体与材质映射" };
+            if (!fxToggle && !matToggle) plan.errors.Add("至少启用一种映射。");
+            var created = new List<GameObject>();
+            var materialsBefore = new Dictionary<Renderer, Material[]>();
+            var sourceRoot = source; var targetRoot = target;
+            plan.validate = () => sourceRoot == null || targetRoot == null ? "源或目标已丢失。" : null;
+            plan.rollback = () =>
             {
-                Debug.LogError("未选择目标根节点！");
-                statusMessage = "未选择目标根节点";
-                return;
-            }
-    
+                foreach (var go in created.Where(go => go != null)) UnityEngine.Object.DestroyImmediate(go);
+                foreach (var pair in materialsBefore) if (pair.Key != null) { pair.Key.sharedMaterials = pair.Value; Mark(pair.Key); }
+                if (targetRoot != null) EditorSceneManager.MarkSceneDirty(targetRoot.scene);
+            };
             if (fxToggle)
             {
-                ProjectFx();
+                var prefabs = source.GetComponentsInChildren<Transform>(true).Where(t => t != source.transform && PrefabUtility.IsAnyPrefabInstanceRoot(t.gameObject)).ToArray();
+                foreach (var node in prefabs)
+                {
+                    if (prefabs.Any(parent => parent != node && node.IsChildOf(parent))) continue;
+                    try
+                    {
+                        string parentPath = Relative(source.transform, node.parent);
+                        var parent = FindUnique(target.transform, parentPath);
+                        var existing = parent.Cast<Transform>().Where(t => t.name == node.name).ToArray();
+                        if (existing.Length == 1) continue;
+                        if (existing.Length > 1) throw new InvalidOperationException("目标同名节点不唯一：" + parentPath + "/" + node.name);
+                        var asset = PrefabUtility.GetCorrespondingObjectFromSource(node.gameObject);
+                        if (asset == null) throw new InvalidOperationException("预制体来源不可用：" + node.name);
+                        if (PrefabUtility.GetAddedGameObjects(node.gameObject).Count > 0 || PrefabUtility.GetAddedComponents(node.gameObject).Count > 0 || PrefabUtility.GetRemovedComponents(node.gameObject).Count > 0 || PrefabUtility.GetRemovedGameObjects(node.gameObject).Count > 0)
+                            throw new InvalidOperationException(node.name + " 包含添加/删除节点或组件的覆盖，请先保存为独立预制体再映射。");
+                        var modifications = PrefabUtility.GetPropertyModifications(node.gameObject);
+                        string before = EditorJsonUtility.ToJson(node);
+                        plan.Watch(AssetDatabase.GetAssetPath(asset));
+                        plan.Add("新增 " + parentPath + "/" + node.name + "（保留属性覆盖和局部变换）", transaction =>
+                        {
+                            if (node == null || parent == null || EditorJsonUtility.ToJson(node) != before || parent.Cast<Transform>().Any(t => t.name == node.name))
+                                throw new InvalidOperationException("节点已变化，请重新预览。");
+                            var clone = (GameObject)PrefabUtility.InstantiatePrefab(asset, parent);
+                            created.Add(clone); Undo.RegisterCreatedObjectUndo(clone, "映射特效预制体");
+                            if (modifications != null) PrefabUtility.SetPropertyModifications(clone, modifications);
+                            clone.name = node.name; clone.SetActive(node.gameObject.activeSelf);
+                            clone.transform.localPosition = node.localPosition;
+                            clone.transform.localRotation = node.localRotation;
+                            clone.transform.localScale = node.localScale;
+                            PrefabUtility.RecordPrefabInstancePropertyModifications(clone);
+                            PrefabUtility.RecordPrefabInstancePropertyModifications(clone.transform);
+                            EditorSceneManager.MarkSceneDirty(clone.scene);
+                        });
+                    }
+                    catch (Exception e) { plan.errors.Add(e.Message); }
+                }
             }
-                
             if (matToggle)
-            {
-                ProjectMat();
-            }
-            statusMessage = "运行完成";
-        }
-    
-        private void GetSkinnedMeshRenderers(GameObject src)
-        {
-            skinMats = new Dictionary<Material[], string>();
-            foreach (Renderer renderer in src.GetComponentsInChildren<Renderer>(true))
-            {
-                if(renderer.gameObject == src)
-                    continue;
-                string path = GetChildRelativePath(renderer.transform);
-                Debug.Log(path);
-                Material[] matList = new Material[renderer.sharedMaterials.Length];
-                for (int i = 0; i < renderer.sharedMaterials.Length; i++)
+                foreach (var renderer in source.GetComponentsInChildren<Renderer>(true))
                 {
-                    matList[i] = renderer.sharedMaterials[i];
-                }
-                skinMats.Add(matList,path);
-            }
-        }
-        
-        public void GetPrefabAtChild(GameObject src)
-        {
-            Debug.Log("> GetPrefabAtChild");
-            fxPrefabs = new Dictionary<GameObject, string>();
-            
-            foreach (Transform fx in src.GetComponentsInChildren<Transform>(true))
-            {
-                
-                if (PrefabUtility.IsAnyPrefabInstanceRoot(fx.gameObject))
-                {
-                    
-                    while (PrefabUtility.IsPartOfPrefabInstance(fx.gameObject) && 
-                           PrefabUtility.GetOutermostPrefabInstanceRoot(fx.gameObject) != fx.gameObject)
+                    try
                     {
-                        var ins = PrefabUtility.GetOutermostPrefabInstanceRoot(fx.gameObject);
-                        PrefabUtility.UnpackPrefabInstance(ins,PrefabUnpackMode.OutermostRoot,InteractionMode.AutomatedAction);
+                        string path = Relative(source.transform, renderer.transform);
+                        var destination = FindUnique(target.transform, path);
+                        var peers = renderer.GetComponents(renderer.GetType());
+                        int index = Array.IndexOf(peers, renderer);
+                        var candidates = destination.GetComponents(renderer.GetType());
+                        if (index >= candidates.Length) throw new InvalidOperationException("目标 Renderer 类型或数量不匹配：" + path);
+                        var targetRenderer = (Renderer)candidates[index];
+                        var before = targetRenderer.sharedMaterials; var after = renderer.sharedMaterials;
+                        if (before.SequenceEqual(after)) continue;
+                        plan.Add("材质 " + (path.Length == 0 ? "<根节点>" : path) + " · " + renderer.GetType().Name + "[" + index + "]", transaction =>
+                        {
+                            if (targetRenderer == null || !targetRenderer.sharedMaterials.SequenceEqual(before)) throw new InvalidOperationException("目标材质已变化，请重新预览。");
+                            materialsBefore[targetRenderer] = before;
+                            Undo.RecordObject(targetRenderer, "映射材质"); targetRenderer.sharedMaterials = after; Mark(targetRenderer);
+                        });
                     }
-                   
-                    if (fx != src.transform)
-                    {
-                        string path = GetChildRelativePath(fx);
-                        // if (path == fx.name)
-                        // {
-                        //     path = path + "/";
-                        // }
-                        // else
-                        // {
-                        //     path = path.Substring(0, path.Length - fx.name.Length);
-                        // }
-                        path = path.Substring(0, path.Length - fx.name.Length);
-                        //Debug.Log(path);
-                        fxPrefabs.Add(fx.gameObject,path);
-                    }
-                    
+                    catch (Exception e) { plan.errors.Add(e.Message); }
                 }
-            }
+            return plan;
         }
-    
-        private void ProjectFx()
+        static void Mark(Renderer renderer)
         {
-            GetPrefabAtChild(source);
-            
-            foreach (var VARIABLE in fxPrefabs.Keys)
-            {
-                Transform child = FindChild(target.transform,fxPrefabs[VARIABLE]);
-               
-                if (child != null)
-                {
-                    //Debug.LogWarning(VARIABLE.name);
-                    
-                    GameObject src = PrefabUtility.GetCorrespondingObjectFromSource(VARIABLE) as GameObject;
-                    PrefabUtility.InstantiatePrefab(src, child);
-                }
-                else
-                {
-                    Debug.LogError("child is null");
-                }
-                
-            }
+            if (PrefabUtility.IsPartOfPrefabInstance(renderer)) PrefabUtility.RecordPrefabInstancePropertyModifications(renderer);
+            EditorSceneManager.MarkSceneDirty(renderer.gameObject.scene);
         }
-    
-        private void ProjectMat()
-        {
-            GetSkinnedMeshRenderers(source);
-            foreach (var VARIABLE in skinMats.Keys)
-            {
-                Transform child = FindChild(target.transform, skinMats[VARIABLE]);
-    
-                if (child != null)
-                {
-                    SkinnedMeshRenderer renderer = child.GetComponent<SkinnedMeshRenderer>();
-                    if (renderer != null)
-                    {
-                        renderer.sharedMaterials = VARIABLE;
-                    }
-                    else
-                    {
-                        Debug.LogWarning($"Renderer not found.Name is: +{child.name}");
-                    }
-                        
-                }
-            }
-        }
-        
-        // 获取子对象相对于其直接父对象的路径
-        private string GetChildRelativePath(Transform child)
-        {
-            Debug.Log("> GetChildRelativePath");
-            if (child.parent == null)
-                return ""; // 如果没有父对象，则返回根目录符号或者你可以选择返回空字符串或其他标识符
-            
-            string path = child.name;
-            Transform parent = child.parent;
-            
-            while(parent != null) // 继续向上直到找到最顶层的父对象
-            {
-                if (parent.gameObject == source.gameObject)
-                {
-                    path = "<root>" + "/" + path;
-                    break;
-                }
-                    
-                path = parent.name + "/" + path;
-    
-                parent = parent.parent;
-            }
-            Debug.Log("ChildRelativePath : " + path);
-            // 如果需要的是相对于直接父对象的路径，可以简化上面的循环逻辑
-            // 这里我们返回的是从根到该对象的完整路径
-            return path;
-        }
-        // 根据路径字符串查找子对象
-        private Transform FindChild(Transform root, string path)
-        {
-            Debug.Log("> FindChild");
-            Transform parent = root;
-            // 如果路径为空或者parent为null，则直接返回null
-            if (string.IsNullOrEmpty(path) || parent == null)
-            {
-                Debug.LogError("path or parent is null");
-                return null;
-            }
-                
-            
-            // 按照'/'分割路径
-            string[] parts = path.Split('/');
-    
-            //bool skip1 = true;
-            // 遍历每个部分
-            foreach (string part in parts)
-            {
-                // if (skip1)
-                // {
-                //     skip1 = false;
-                //     continue;
-                // }
-                
-                // 尝试找到名字匹配的子对象
-                //Debug.LogWarning(part);
-                if (part == "<root>")
-                {
-                    continue;
-                }
-                Transform child = parent.Find(part);
-                if (child == null)
-                {
-                    Debug.LogWarning($"Child not found, path is: {path}");
-                    return null; // 如果找不到，返回null
-                }
-                    
-                else
-                    parent = child; // 向下一层搜索
-            }
-            Debug.Log($"Child found, path is: {path}");
-            return parent; // 返回最终找到的对象
-        }
-    
-       
     }
 }
-
-

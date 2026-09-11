@@ -59,7 +59,7 @@ namespace ToolSet
             EnsureUiStyles();
 
             ToolUi.DrawToolHeader("非法引用查询工具",
-                "用途：在指定查询对象中扫描“越界依赖引用”，可通过排除规则忽略目录/类型，支持定位、候选替换、删除引用（GUID置空）、复制并替换。");
+                "用途：在指定查询对象中扫描“越界依赖引用”，可通过排除规则忽略目录/类型，支持定位、候选替换、清空对象引用、复制并替换。");
 
             ToolUi.DrawFoldoutCard("1) 查询对象", ref targetFoldout, DrawTargetSection);
             ToolUi.DrawFoldoutCard("2) 忽略规则（排除目录/类型）", ref ruleFoldout, DrawRuleSection);
@@ -139,13 +139,16 @@ namespace ToolSet
             EditorGUILayout.EndScrollView();
         }
 
+        private string resultFilter = "";
+        private int resultPage;
+
         private void DrawResultSection()
         {
             using (new EditorGUILayout.HorizontalScope())
             {
                 if (GUILayout.Button("开始查询", GUILayout.Height(28)))
                 {
-                    RunQuery();
+                    EditorApplication.delayCall += RunQuery;
                 }
 
                 replaceCopyTargetFolder =
@@ -159,10 +162,13 @@ namespace ToolSet
                 return;
             }
 
+            resultFilter = EditorGUILayout.TextField("筛选名称或路径", resultFilter);
+            var visible = results.Where(r => r.illegalPath.IndexOf(resultFilter, StringComparison.OrdinalIgnoreCase) >= 0).ToList();
+            ToolUi.DrawPager(ref resultPage, visible.Count, 30);
             resultScroll = EditorGUILayout.BeginScrollView(resultScroll, GUILayout.Height(360));
-            for (int i = 0; i < results.Count; i++)
+            for (int i = resultPage * 30; i < Math.Min(visible.Count, (resultPage + 1) * 30); i++)
             {
-                DrawResultItem(results[i], i + 1);
+                DrawResultItem(visible[i], i + 1);
             }
 
             EditorGUILayout.EndScrollView();
@@ -211,16 +217,14 @@ namespace ToolSet
                         : $"找到候选 {item.candidatePaths.Count} 个：{item.fileName}";
                 }
 
-                if (GUILayout.Button("删除引用(GUID置空)", GUILayout.Width(140)))
+                if (GUILayout.Button("预览清空引用", GUILayout.Width(140)))
                 {
                     ReplaceGuidForItem(item, ZeroGuid, "删除引用");
-                    return;
                 }
 
                 if (GUILayout.Button("复制到目标目录并替换", GUILayout.Width(160)))
                 {
                     CopyAndReplace(item);
-                    return;
                 }
             }
 
@@ -309,6 +313,13 @@ namespace ToolSet
 
         private void RunQuery()
         {
+            try { ToolAssetCache.Clear(); RunQueryCore(); }
+            catch (OperationCanceledException) { statusMessage = "查询已取消，保留上次结果"; }
+            catch (Exception e) { statusMessage = "查询失败：" + e.Message; Debug.LogException(e); }
+            finally { EditorUtility.ClearProgressBar(); }
+        }
+        private void RunQueryCore()
+        {
             Dictionary<string, ScanEntry> scanEntries = CollectScanEntries();
             if (scanEntries.Count == 0)
             {
@@ -321,9 +332,13 @@ namespace ToolSet
             List<string> excludedFolderPaths = GetExcludeFolderPaths();
             Dictionary<string, IllegalReferenceItem> itemMap = new(StringComparer.OrdinalIgnoreCase);
 
+            int scanned = 0;
             foreach (ScanEntry entry in scanEntries.Values)
             {
-                string[] deps = AssetDatabase.GetDependencies(entry.assetPath, false);
+                if (EditorUtility.DisplayCancelableProgressBar("检查外部引用", entry.assetPath, (float)scanned++ / scanEntries.Count))
+                    throw new OperationCanceledException();
+                if (ShouldExcludeDependency(entry.assetPath, excludedExtensions, excludedFolderPaths)) continue;
+                string[] deps = ToolAssetCache.Dependencies(entry.assetPath, false);
                 foreach (string depPath in deps)
                 {
                     if (string.Equals(depPath, entry.assetPath, StringComparison.OrdinalIgnoreCase))
@@ -412,7 +427,7 @@ namespace ToolSet
                 }
                 else
                 {
-                    GetOrCreateScanEntry(map, targetPath);
+                    GetOrCreateScanEntry(map, targetPath).ownerDirectoryRoots.Add(Path.GetDirectoryName(targetPath).Replace('\\', '/'));
                 }
             }
 
@@ -580,110 +595,28 @@ namespace ToolSet
 
         private void ReplaceGuidForItem(IllegalReferenceItem item, string newGuid, string actionName)
         {
-            if (item == null || string.IsNullOrWhiteSpace(item.illegalGuid))
+            ToolWorkflow.Preview(() =>
             {
-                statusMessage = "当前非法引用GUID无效，无法执行替换";
-                return;
-            }
-
-            if (string.IsNullOrWhiteSpace(newGuid))
-            {
-                statusMessage = "新GUID无效";
-                return;
-            }
-
-            int changedCount = 0;
-            int scannedCount = 0;
-            List<string> changedAssets = new();
-
-            foreach (string refPath in item.referencedByPaths.Distinct(StringComparer.OrdinalIgnoreCase))
-            {
-                if (!IsSupportedGuidReplaceFile(refPath))
-                {
-                    continue;
-                }
-
-                string absolutePath = ToAbsolutePath(refPath);
-                if (!File.Exists(absolutePath))
-                {
-                    continue;
-                }
-
-                scannedCount++;
-                string content;
-                try
-                {
-                    content = File.ReadAllText(absolutePath, Encoding.UTF8);
-                }
-                catch
-                {
-                    continue;
-                }
-
-                if (!content.Contains(item.illegalGuid))
-                {
-                    continue;
-                }
-
-                string replaced = content.Replace(item.illegalGuid, newGuid);
-                if (ReferenceEquals(content, replaced) || content == replaced)
-                {
-                    continue;
-                }
-
-                File.WriteAllText(absolutePath, replaced, new UTF8Encoding(false));
-                changedAssets.Add(refPath);
-                changedCount++;
-            }
-
-            if (changedAssets.Count > 0)
-            {
-                AssetDatabase.StartAssetEditing();
-                try
-                {
-                    foreach (string changedPath in changedAssets)
-                    {
-                        AssetDatabase.ImportAsset(changedPath, ImportAssetOptions.ForceUpdate);
-                    }
-                }
-                finally
-                {
-                    AssetDatabase.StopAssetEditing();
-                }
-            }
-
-            AssetDatabase.Refresh(ImportAssetOptions.ForceUpdate);
-            statusMessage = $"{actionName}完成：扫描 {scannedCount}，修改 {changedCount}";
-            RunQuery();
+                var plan = ReferenceRepair.Build(actionName, item.illegalGuid, item.illegalPath,
+                    AssetDatabase.GUIDToAssetPath(newGuid), item.referencedByPaths, newGuid == ZeroGuid);
+                plan.completed = RunQuery;
+                return plan;
+            });
         }
 
         private void CopyAndReplace(IllegalReferenceItem item)
         {
-            if (item == null || string.IsNullOrWhiteSpace(item.illegalPath) || !File.Exists(ToAbsolutePath(item.illegalPath)))
+            ToolWorkflow.Preview(() =>
             {
-                statusMessage = "非法资源不存在，无法复制";
-                return;
-            }
-
-            string targetFolderPath = replaceCopyTargetFolder == null ? string.Empty : AssetDatabase.GetAssetPath(replaceCopyTargetFolder);
-            if (string.IsNullOrWhiteSpace(targetFolderPath) || !AssetDatabase.IsValidFolder(targetFolderPath))
-            {
-                statusMessage = "请先指定有效的复制替换目标目录";
-                return;
-            }
-
-            string desiredPath = $"{targetFolderPath}/{Path.GetFileName(item.illegalPath)}";
-            string newAssetPath = AssetDatabase.GenerateUniqueAssetPath(desiredPath);
-            bool copied = AssetDatabase.CopyAsset(item.illegalPath, newAssetPath);
-            if (!copied)
-            {
-                statusMessage = $"复制失败：{item.illegalPath}";
-                return;
-            }
-
-            AssetDatabase.ImportAsset(newAssetPath, ImportAssetOptions.ForceUpdate);
-            string newGuid = AssetDatabase.AssetPathToGUID(newAssetPath);
-            ReplaceGuidForItem(item, newGuid, "复制并替换引用");
+                string folder = AssetDatabase.GetAssetPath(replaceCopyTargetFolder);
+                if (!ToolPaths.Contains("Assets", folder) || !AssetDatabase.IsValidFolder(folder))
+                    throw new InvalidOperationException("请选择 Assets 内的复制输出目录。");
+                string destination = new CopyPathAllocator().Reserve(item.illegalPath, folder, "");
+                var plan = ReferenceRepair.Build("复制并替换引用", item.illegalGuid, item.illegalPath,
+                    item.illegalPath, item.referencedByPaths, identicalCopy: true, copyDestination: destination);
+                plan.completed = RunQuery;
+                return plan;
+            });
         }
 
         private static bool IsSupportedGuidReplaceFile(string assetPath)

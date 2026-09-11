@@ -5,6 +5,17 @@ namespace ToolSet
 {
     internal static class ToolUi
     {
+        public static void DrawPager(ref int page, int count, int size)
+        {
+            int last = Mathf.Max(0, (count - 1) / size);
+            page = Mathf.Clamp(page, 0, last);
+            using (new EditorGUILayout.HorizontalScope())
+            {
+                if (GUILayout.Button("上一页", GUILayout.Width(65))) page = Mathf.Max(0, page - 1);
+                GUILayout.Label($"{page + 1}/{last + 1} 页 · {count} 项");
+                if (GUILayout.Button("下一页", GUILayout.Width(65))) page = Mathf.Min(last, page + 1);
+            }
+        }
         private static GUIStyle titleStyle;
         private static GUIStyle sectionStyle;
         private static GUIStyle statusStyle;
@@ -69,14 +80,16 @@ namespace ToolSet
         {
             EnsureStyles();
             EditorGUILayout.BeginVertical("box");
-            foldout = EditorGUILayout.Foldout(foldout, title, true);
-            if (foldout)
+            try
             {
-                EditorGUILayout.Space(2);
-                drawContent?.Invoke();
+                foldout = EditorGUILayout.Foldout(foldout, title, true);
+                if (foldout)
+                {
+                    EditorGUILayout.Space(2);
+                    drawContent?.Invoke();
+                }
             }
-
-            EditorGUILayout.EndVertical();
+            finally { EditorGUILayout.EndVertical(); }
             EditorGUILayout.Space(4);
         }
 

@@ -1,3 +1,4 @@
+using System;
 using UnityEngine;
 using UnityEditor;
 using System.Collections.Generic;
@@ -7,7 +8,7 @@ using UnityEditor.SceneManagement;
 
 namespace ToolSet
 {
-    public class BatchRenameTool : EditorWindow, IToolGUI
+    public class BatchRenameTool : ToolPanel
     {
         private string newBaseName = "";
         private string replacePart = "";
@@ -19,11 +20,16 @@ namespace ToolSet
         private bool includeChildren = true;
         private string statusMessage = "等待操作";
 
+        private List<string> cachedAssets;
+        private List<GameObject> cachedNodes;
+        private bool cachedIncludeChildren;
+        private int startNumber = 1, numberDigits = 1;
+        public override void Invalidate() { cachedAssets = null; cachedNodes = null; }
         private Options options = Options.基础名称加序号;
 
-        public void DrawGUI()
+        public override void DrawGUI()
         {
-            ToolUi.DrawToolHeader("批量重命名工具", "支持资源文件与Hierarchy节点的统一命名规则。");
+            ToolUi.DrawToolHeader("批量重命名工具", "资源文件按路径排序；仅处理文件。场景节点支持撤销，预览列出原名与新名。");
 
             ToolUi.BeginCard("1) 目标与规则");
             GUILayout.Label("作用对象：", EditorStyles.boldLabel);
@@ -39,7 +45,11 @@ namespace ToolSet
             options = (Options)EditorGUILayout.EnumPopup(options);
 
             if (options == Options.基础名称加序号)
+                {
                 newBaseName = EditorGUILayout.TextField("新基础名称:", newBaseName);
+                startNumber = EditorGUILayout.IntField("起始序号", startNumber);
+                numberDigits = Mathf.Clamp(EditorGUILayout.IntField("序号位数", numberDigits), 1, 8);
+                }
             if (options == Options.替换部分字符串)
             {
                 replacePart = EditorGUILayout.TextField("替换字符串:", replacePart);
@@ -57,9 +67,9 @@ namespace ToolSet
             ToolUi.EndCard();
 
             ToolUi.BeginCard("2) 执行");
-            if (GUILayout.Button("重命名"))
+            if (GUILayout.Button("预览重命名"))
             {
-                PerformRename();
+                ToolWorkflow.Preview(BuildPlan);
             }
             ToolUi.EndCard();
 
@@ -69,23 +79,7 @@ namespace ToolSet
             ToolUi.DrawStatus(statusMessage);
         }
 
-        private void PerformRename()
-        {
-            if (!ValidateInput())
-            {
-                return;
-            }
 
-            switch (renameTarget)
-            {
-                case RenameTarget.资源文件:
-                    RenameAssets();
-                    break;
-                case RenameTarget.Hierarchy节点:
-                    RenameHierarchyNodes();
-                    break;
-            }
-        }
 
         private void DrawCurrentSelection()
         {
@@ -95,7 +89,7 @@ namespace ToolSet
                 {
                     var assetPaths = GetSelectedAssetPaths();
                     GUILayout.Label($"当前选择文件（{assetPaths.Count}）：");
-                    foreach (var assetPath in assetPaths)
+                    foreach (var assetPath in assetPaths.Take(100))
                     {
                         GUILayout.Label(Path.GetFileName(assetPath));
                     }
@@ -105,7 +99,7 @@ namespace ToolSet
                 {
                     var nodes = GetSelectedHierarchyNodes(includeChildren);
                     GUILayout.Label($"当前选择Hierarchy节点（{nodes.Count}）：");
-                    foreach (var go in nodes)
+                    foreach (var go in nodes.Take(100))
                     {
                         GUILayout.Label(GetHierarchyPath(go.transform));
                     }
@@ -116,120 +110,93 @@ namespace ToolSet
 
         private bool ValidateInput()
         {
-            if (options == Options.基础名称加序号 && string.IsNullOrEmpty(newBaseName))
-            {
-                Debug.LogWarning("请输入新基础名称。");
-                return false;
-            }
-
-            if (options == Options.替换部分字符串 && string.IsNullOrEmpty(replacePart))
-            {
-                Debug.LogWarning("替换字符串不能为空。");
-                return false;
-            }
-            if (options == Options.插入字符串 && string.IsNullOrEmpty(insertPart))
-            {
-                Debug.LogWarning("插入字符串不能为空。");
-                return false;
-            }
-
-            switch (renameTarget)
-            {
-                case RenameTarget.资源文件:
-                    if (GetSelectedAssetPaths().Count == 0)
-                    {
-                        Debug.LogWarning("请至少选择一个资源文件。");
-                        return false;
-                    }
-                    break;
-                case RenameTarget.Hierarchy节点:
-                    if (GetSelectedHierarchyNodes(includeChildren).Count == 0)
-                    {
-                        Debug.LogWarning("请至少选择一个Hierarchy节点。");
-                        return false;
-                    }
-                    break;
-            }
-
+            if (options == Options.基础名称加序号 && string.IsNullOrWhiteSpace(newBaseName)) throw new InvalidOperationException("请输入基础名称。");
+            if (options == Options.替换部分字符串 && string.IsNullOrEmpty(replacePart)) throw new InvalidOperationException("替换字符串不能为空。");
+            if (options == Options.插入字符串 && string.IsNullOrEmpty(insertPart)) throw new InvalidOperationException("插入字符串不能为空。");
             return true;
         }
 
-        private void RenameAssets()
+
+
+
+
+        internal ToolPlan BuildPlan()
         {
-            var selectedPaths = GetSelectedAssetPaths();
-            int sequence = 1;
-            int renamedCount = 0;
-
-            foreach (var path in selectedPaths)
+            Invalidate(); ValidateInput();
+            var plan = new ToolPlan { title = "批量重命名（资源保持 GUID，场景节点支持 Undo）" };
+            if (renameTarget == RenameTarget.资源文件)
             {
-                string oldName = Path.GetFileNameWithoutExtension(path);
-                string newName = BuildNewName(oldName, sequence);
-                if (options == Options.基础名称加序号)
+                var selected = GetSelectedAssetPaths();
+                var changes = selected.Select((p, i) => new {
+                    oldPath = p, guid = AssetDatabase.AssetPathToGUID(p),
+                    name = BuildNewName(Path.GetFileNameWithoutExtension(p), i + 1),
+                    temp = AssetDatabase.GenerateUniqueAssetPath(Path.GetDirectoryName(p).Replace('\\', '/') + "/__ToolSet_" + Guid.NewGuid().ToString("N") + Path.GetExtension(p))
+                }).Where(c => c.name != Path.GetFileNameWithoutExtension(c.oldPath)).ToArray();
+                var destinations = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                var moving = new HashSet<string>(changes.Select(c => c.oldPath), StringComparer.OrdinalIgnoreCase);
+                foreach (var c in changes)
                 {
-                    sequence++;
+                    string destination = Path.GetDirectoryName(c.oldPath).Replace('\\', '/') + "/" + c.name + Path.GetExtension(c.oldPath);
+                    if (!ValidName(c.name)) plan.errors.Add("无效文件名：" + c.name);
+                    if (!destinations.Add(destination) || (File.Exists(destination) && !moving.Contains(destination)) || Directory.Exists(destination))
+                        plan.errors.Add("目标名称冲突：" + destination);
+                    try { ToolPaths.RequireWritableAsset(c.oldPath); } catch (Exception e) { plan.errors.Add(e.Message); }
+                    plan.Watch(c.oldPath); plan.Watch(destination); plan.Watch(c.temp);
+                    plan.Add("准备重命名 " + c.oldPath, transaction =>
+                    {
+                        transaction.Capture(c.oldPath); transaction.Capture(destination); transaction.Capture(c.temp);
+                        string error = AssetDatabase.RenameAsset(AssetDatabase.GUIDToAssetPath(c.guid), Path.GetFileNameWithoutExtension(c.temp));
+                        if (!string.IsNullOrEmpty(error)) throw new IOException(error);
+                    });
                 }
-
-                if (oldName == newName)
-                {
-                    continue;
-                }
-
-                string error = AssetDatabase.RenameAsset(path, newName);
-                if (!string.IsNullOrEmpty(error))
-                {
-                    Debug.LogWarning($"重命名失败：{path}，原因：{error}");
-                    continue;
-                }
-
-                renamedCount++;
+                foreach (var c in changes)
+                    plan.Add(c.oldPath + " → " + c.name + Path.GetExtension(c.oldPath), transaction =>
+                    {
+                        string error = AssetDatabase.RenameAsset(AssetDatabase.GUIDToAssetPath(c.guid), c.name);
+                        if (!string.IsNullOrEmpty(error)) throw new IOException(error);
+                    });
             }
-
-            AssetDatabase.SaveAssets();
-            AssetDatabase.Refresh();
-            Debug.Log($"资源重命名完成，共成功 {renamedCount} 个。");
-            statusMessage = $"资源重命名完成：成功 {renamedCount} 个";
+            else
+            {
+                var changes = GetSelectedHierarchyNodes(includeChildren).Select((go, i) => new { go, before = go.name, after = BuildNewName(go.name, i + 1) }).Where(c => c.before != c.after).ToArray();
+                foreach (var c in changes)
+                {
+                    if (!ValidName(c.after)) plan.errors.Add("无效节点名称：" + c.after);
+                    plan.Add(GetHierarchyPath(c.go.transform) + " → " + c.after, transaction =>
+                    {
+                        if (c.go == null || c.go.name != c.before) throw new InvalidOperationException("节点已改变，请重新预览。");
+                        Undo.RecordObject(c.go, "重命名节点"); c.go.name = c.after;
+                        if (PrefabUtility.IsPartOfPrefabInstance(c.go)) PrefabUtility.RecordPrefabInstancePropertyModifications(c.go);
+                        EditorSceneManager.MarkSceneDirty(c.go.scene);
+                    });
+                }
+                plan.rollback = () =>
+                {
+                    foreach (var c in changes)
+                        if (c.go != null && c.go.name == c.after)
+                        {
+                            c.go.name = c.before;
+                            if (PrefabUtility.IsPartOfPrefabInstance(c.go)) PrefabUtility.RecordPrefabInstancePropertyModifications(c.go);
+                            EditorSceneManager.MarkSceneDirty(c.go.scene);
+                        }
+                };
+                plan.validate = () => changes.Any(c => c.go == null || c.go.name != c.before) ? "节点已改变，请重新预览。" : null;
+            }
+            plan.completed = Invalidate;
+            return plan;
         }
-
-        private void RenameHierarchyNodes()
+        private static bool ValidName(string value)
         {
-            var nodes = GetSelectedHierarchyNodes(includeChildren);
-            var unityObjects = nodes.Select(n => (UnityEngine.Object)n).ToArray();
-            Undo.RecordObjects(unityObjects, "Batch Rename Hierarchy Nodes");
-
-            int sequence = 1;
-            int renamedCount = 0;
-            foreach (var node in nodes)
-            {
-                string newName = BuildNewName(node.name, sequence);
-                if (options == Options.基础名称加序号)
-                {
-                    sequence++;
-                }
-
-                if (newName == node.name)
-                {
-                    continue;
-                }
-
-                node.name = newName;
-                EditorUtility.SetDirty(node);
-                renamedCount++;
-            }
-
-            if (renamedCount > 0)
-            {
-                EditorSceneManager.MarkAllScenesDirty();
-            }
-
-            Debug.Log($"Hierarchy节点重命名完成，共成功 {renamedCount} 个。");
-            statusMessage = $"Hierarchy节点重命名完成：成功 {renamedCount} 个";
+            if (string.IsNullOrWhiteSpace(value) || value.EndsWith(".") || value.EndsWith(" ") || value.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0) return false;
+            string stem = value.Split('.')[0].ToUpperInvariant();
+            return !new[] { "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9" }.Contains(stem);
         }
 
         private string BuildNewName(string oldName, int sequence)
         {
             if (options == Options.基础名称加序号)
             {
-                return $"{newBaseName}_{sequence}";
+                return newBaseName + "_" + (sequence + startNumber - 1).ToString("D" + numberDigits);
             }
 
             if (options == Options.替换部分字符串)
@@ -258,26 +225,24 @@ namespace ToolSet
 
         private List<string> GetSelectedAssetPaths()
         {
-            var paths = new List<string>();
-            foreach (var guid in Selection.assetGUIDs)
-            {
-                string assetPath = AssetDatabase.GUIDToAssetPath(guid);
-                if (!string.IsNullOrEmpty(assetPath))
-                    paths.Add(assetPath);
-            }
-
-            return paths;
+            if (cachedAssets == null)
+                cachedAssets = Selection.assetGUIDs.Select(AssetDatabase.GUIDToAssetPath)
+                    .Where(p => ToolPaths.Contains("Assets", p) && File.Exists(p) && !AssetDatabase.IsValidFolder(p))
+                    .Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(p => p, StringComparer.OrdinalIgnoreCase).ToList();
+            return cachedAssets;
         }
 
         private List<GameObject> GetSelectedHierarchyNodes(bool withChildren)
         {
+            if (cachedNodes != null && cachedIncludeChildren == withChildren) return cachedNodes;
+            cachedIncludeChildren = withChildren;
             var selected = Selection.gameObjects;
             var results = new List<GameObject>();
             var visited = new HashSet<int>();
 
             foreach (var go in selected)
             {
-                if (go == null)
+                if (go == null || EditorUtility.IsPersistent(go) || !go.scene.IsValid())
                 {
                     continue;
                 }
@@ -295,7 +260,7 @@ namespace ToolSet
                 CollectHierarchyNodes(go.transform, results, visited);
             }
 
-            return results
+            return cachedNodes = results
                 .OrderBy(go => go.scene.name)
                 .ThenBy(go => GetHierarchyPath(go.transform))
                 .ToList();

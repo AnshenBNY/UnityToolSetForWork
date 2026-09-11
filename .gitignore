@@ -36,3 +36,11 @@ $RECYCLE.BIN/
 
 # Windows shortcuts
 *.lnk
+# Keep metadata for the shared editor-tool infrastructure.
+!PrefabCopyPlan.cs.meta
+!ReferenceRepair.cs.meta
+!ToolAssetCache.cs.meta
+!ToolPreferences.cs.meta
+!ToolWorkflow.cs.meta
+!CopyOverview.cs.meta
+!SceneCopyPlan.cs.meta

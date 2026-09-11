@@ -21,7 +21,7 @@ namespace ToolSet
     ///    - ParticleSystemRenderer 主材质 与 粒子拖尾(trails)材质
     ///    - TrailRenderer 组件材质（独立拖尾组件）
     ///    （由 "复制粒子材质" 按钮触发，输出到 FxMaterialsCopyPath）
-    /// 4. 复制粒子系统使用的网格资源（"复制粒子网格"按钮）
+    /// 4. 复制粒子系统 Renderer Mesh 列表中的全部网格资源，保留顺序与权重（"复制粒子网格"按钮）
     /// 5. 复制根预制体下 MeshFilter 引用的 mesh 资源（"复制 MeshFilter 网格"按钮）
     ///    处理范围：根预制体散落节点 + 嵌套普通子 prefab 内部节点
     ///    支持类型：独立 .mesh / .asset 资源 与 模型文件(.fbx 等)中的子 mesh
@@ -56,12 +56,12 @@ namespace ToolSet
     /// 4. 对复制后的预制体实例，依次执行材质和网格复制操作
     /// 5. 最后保存修改后的预制体
     /// </summary>
-    public class PrefabCopyTool : EditorWindow, IToolGUI
+    public partial class PrefabCopyTool : ToolPanel
     {
         #region 字段定义
 
         // ========== 预制体引用 ==========
-        /// <summary>当前处理的源预制体（可以是Assets中的预制体或场景中的实例）</summary>
+        /// <summary>高级分步处理的当前场景实例；完整复制使用 sourcePrefabs 列表。</summary>
         private GameObject rootPrefab;
         /// <summary>复制后的预制体资源（Assets中）</summary>
         private GameObject rootPrefabCopy;
@@ -72,7 +72,6 @@ namespace ToolSet
         /// <summary>需要排除的文件夹列表（这些目录中的资源不会被复制）</summary>
         private List<DefaultAsset> excludeFolders = new List<DefaultAsset>();
         /// <summary>排除目录列表的滚动位置</summary>
-        private Vector2 excludeScrollPosition;
         /// <summary>输出文件夹（运行时会写入下方各 *Path 字段）</summary>
         private DefaultAsset outputFolder;
 
@@ -134,378 +133,45 @@ namespace ToolSet
         /// 绘制工具的GUI界面
         /// 实现 IToolGUI 接口
         /// </summary>
-        public void DrawGUI()
+        public override void DrawGUI()
         {
-            ToolUi.DrawToolHeader("Prefab复制工具", "支持一键复制与分步复制，按模块输出并可维护引用关系。");
-            
-            // 使用盒子区域组织UI
-            EditorGUILayout.BeginVertical("box");
-           
-            EditorGUILayout.Space();
-            DrawSectionSeparator("基础配置");
-    
-            rootPrefab = (GameObject)EditorGUILayout.ObjectField("当前处理预制体:", rootPrefab, typeof(GameObject), true);
-            if (rootPrefab != null && IsGameObjectInScene(rootPrefab))
-            {
-                EditorGUILayout.HelpBox(
-                    "当前为场景中的预制体实例。一键复制请从 Project 窗口拖入 Assets 中的预制体资源；分步操作（复制材质等）可使用场景实例。",
-                    MessageType.Warning);
-            }
-            else if (rootPrefab != null)
-            {
-                EditorGUILayout.HelpBox("当前为 Assets 预制体资源，可直接使用一键复制。", MessageType.Info);
-            }
-
-            outputFolder = EditorGUILayout.ObjectField("输出文件夹：", outputFolder, typeof(DefaultAsset), false) as DefaultAsset;
-            enableVerboseLog = EditorGUILayout.ToggleLeft("启用详细日志（可能影响执行速度）", enableVerboseLog);
-            enableStepTimingLog = EditorGUILayout.ToggleLeft("启用分步骤耗时统计", enableStepTimingLog);
-            enableDeferredAssetOps = EditorGUILayout.ToggleLeft(
-                "启用延迟资产操作优化（减少中途 Refresh/Save，通常更快）",
-                enableDeferredAssetOps);
-            if (GUILayout.Button("添加排除目录"))
-            {
-                excludeFolders.Add(null);
-            }
-            excludeScrollPosition = EditorGUILayout.BeginScrollView(excludeScrollPosition, GUILayout.Height(100));
-           
-            GUILayout.Label("添加排除目录 （以下文件夹中的资源不会被复制）:", EditorStyles.boldLabel);
+            ToolUi.DrawToolHeader("预制体复制", "添加一个或多个预制体，选择输出位置，查看清单后统一复制。");
+            string previousInput = CopyInputSignature();
+            DrawSourcePrefabs();
+            outputFolder = (DefaultAsset)EditorGUILayout.ObjectField("输出目录", outputFolder, typeof(DefaultAsset), false);
+            ToolUi.BeginCard("不复制的资源目录");
             for (int i = 0; i < excludeFolders.Count; i++)
+                using (new EditorGUILayout.HorizontalScope())
+                {
+                    excludeFolders[i] = (DefaultAsset)EditorGUILayout.ObjectField(excludeFolders[i], typeof(DefaultAsset), false);
+                    if (GUILayout.Button("移除", GUILayout.Width(50))) excludeFolders.RemoveAt(i--);
+                }
+            if (GUILayout.Button("添加排除目录")) excludeFolders.Add(null);
+            ToolUi.EndCard();
+            using (new EditorGUI.DisabledScope(sourcePrefabs.Count == 0))
+                if (GUILayout.Button(sourcePrefabs.Count > 1 ? $"复制 {sourcePrefabs.Count} 个预制体…" : "复制预制体…", GUILayout.Height(32)))
+                    ToolWorkflow.Preview(PrepareCompleteCopy, nameof(PrefabCopyTool));
+            EditorGUILayout.LabelField("先整理复制内容，再点击下方「开始复制」。", EditorStyles.wordWrappedMiniLabel);
+            showAdvanced = EditorGUILayout.Foldout(showAdvanced, "高级：批量处理场景实例", true);
+            if (showAdvanced)
             {
-                EditorGUILayout.BeginHorizontal();
-                excludeFolders[i] = (DefaultAsset)EditorGUILayout.ObjectField(
-                    $"忽略目录 {i + 1}",
-                    excludeFolders[i],
-                    typeof(DefaultAsset),
-                    false
-                );
-    
-                if (GUILayout.Button("移除", GUILayout.Width(80)))
+                EditorGUILayout.HelpBox("从 Hierarchy 添加一个或多个预制体根实例。各模块处理列表中的全部实例，共用资源只复制一份；修改保留在场景中。", MessageType.Info);
+                DrawSceneInstances();
+                using (new EditorGUI.DisabledScope(sceneInstances.Count == 0))
                 {
-                    excludeFolders.RemoveAt(i);
-                    i--;
+                    if (GUILayout.Button("复制材质…")) PrepareCopyStep("材质", CopyMaterialsFromMeshRender);
+                    if (GUILayout.Button("复制粒子材质…")) PrepareCopyStep("粒子材质", CopyMaterialsFromParticle);
+                    if (GUILayout.Button("复制粒子网格…")) PrepareCopyStep("粒子网格", CopyMeshFromParticle);
+                    if (GUILayout.Button("复制 Image / Text 资源…")) PrepareCopyStep("Image / Text 资源", go => CopyImageAndTextResources(go));
+                    if (GUILayout.Button("复制 MeshFilter 网格…")) PrepareCopyStep("MeshFilter 网格", CopyMeshFromMeshFilter);
+                    if (GUILayout.Button("复制动画与 Timeline…")) PrepareCopyStep("动画与 Timeline", CopyAnimationAndTimeline);
+                    if (GUILayout.Button(sceneInstances.Count > 1 ? "保存所选副本…" : "保存副本…"))
+                        ToolWorkflow.Preview(BuildSceneSavePlan, nameof(PrefabCopyTool));
                 }
-                EditorGUILayout.EndHorizontal();
+                EditorGUILayout.LabelField("保存仅支持本工具生成的根副本；场景修改可用 Ctrl+Z 撤销。", EditorStyles.wordWrappedMiniLabel);
             }
-            EditorGUILayout.EndScrollView();
-
-            DrawSectionSeparator("一键操作");
-            EditorGUILayout.HelpBox(
-                "请先将 Project 中的预制体资源拖入「当前处理预制体」（不可使用场景实例）。\n" +
-                "按顺序执行各复制步骤，并在输出文件夹下自动创建子目录：\n" +
-                "Prefabs / Materials / FxMaterials / Meshes / ImageText / Textures / Animations\n" +
-                "（分步与一键都会自动使用以上分类子目录）",
-                MessageType.None);
-            if (GUILayout.Button("一键复制所有", GUILayout.Height(30)))
-            {
-                TryExecuteCopyAllSteps();
-            }
-            if (GUILayout.Button("一键复制并保存", GUILayout.Height(30)))
-            {
-                TryExecuteCopyAllAndSaveSteps();
-            }
-
-            DrawSectionSeparator("分步复制");
-           
-            // 步骤1: 复制预制体
-            //EditorGUILayout.LabelField("# 复制预制体", EditorStyles.boldLabel);
-            
-            if (GUILayout.Button("复制预制体"))
-            {
-                if (rootPrefab == null)
-                {
-                    EditorUtility.DisplayDialog("错误", "请指定复制的预制体", "确定");
-                    EditorGUILayout.EndVertical();
-                    return;
-                }
-                
-                if (IsGameObjectInScene(rootPrefab))
-                {
-                    EditorUtility.DisplayDialog("错误", "此操作只能处理Assets中的预制体", "确定");
-                    EditorGUILayout.EndVertical();
-                    return;
-                }
-    
-                if (outputFolder == null)
-                {
-                    EditorUtility.DisplayDialog("错误", "请设置输出文件夹", "确定");
-                    EditorGUILayout.EndVertical();
-                    return;
-                }
-                ExecuteStepWithOptionalDeferredAssetOps(() =>
-                {
-                    newFolderPath = GetStepOutputPath(SubDirPrefabs);
-                    RefreshAssetDatabaseIfNeeded();
-    
-                    rootPrefab = ExecuteWithStepTiming("分步-复制预制体", () => CopyRootPrefab());
-                    //flagPrefab = true;
-                
-                    currentStatus = "预制体复制完成";
-                });
-            }
-            
-            EditorGUILayout.Space();
-            //EditorGUILayout.LabelField("# 处理材质", EditorStyles.boldLabel);
-            if (GUILayout.Button("复制材质"))
-            {
-                if (rootPrefab == null)
-                {
-                    EditorUtility.DisplayDialog("错误", "请指定复制的预制体", "确定");
-                    EditorGUILayout.EndVertical();
-                    return;
-                }
-                
-                if (!IsGameObjectInScene(rootPrefab))
-                {
-                    EditorUtility.DisplayDialog("错误", "此操作只能处理场景中的预制体", "确定");
-                    EditorGUILayout.EndVertical();
-                    return;
-                }
-                
-                if (outputFolder == null)
-                {
-                    EditorUtility.DisplayDialog("错误", "请设置输出文件夹", "确定");
-                    EditorGUILayout.EndVertical();
-                    return;
-                }
-                ExecuteStepWithOptionalDeferredAssetOps(() =>
-                {
-                    materialsCopyPath = GetStepOutputPath(SubDirMaterials);
-                    ExecuteWithStepTiming("分步-复制材质", () => CopyMaterialsFromMeshRender(rootPrefab));
-                    //flagMaterial = true;
-                    currentStatus = "材质复制完成";
-                });
-            }
-    
-            EditorGUILayout.Space();
-
-            // 步骤3: 处理粒子材质
-           
-            
-            if (GUILayout.Button("复制粒子材质"))
-            {
-                if (rootPrefab == null)
-                {
-                    EditorUtility.DisplayDialog("错误", "请指定处理的预制体", "确定");
-                    EditorGUILayout.EndVertical();
-                    return;
-                }
-               
-                if (!IsGameObjectInScene(rootPrefab))
-                {
-                    EditorUtility.DisplayDialog("错误", "此操作只能处理场景中的预制体", "确定");
-                    EditorGUILayout.EndVertical();
-                    return;
-                }
-                
-                if (outputFolder == null)
-                {
-                    EditorUtility.DisplayDialog("错误", "请设置输出文件夹", "确定");
-                    EditorGUILayout.EndVertical();
-                    return;
-                }
-                ExecuteStepWithOptionalDeferredAssetOps(() =>
-                {
-                    FxMaterialsCopyPath = GetStepOutputPath(SubDirFxMaterials);
-                    ExecuteWithStepTiming("分步-复制粒子材质", () => CopyMaterialsFromParticle(rootPrefab));
-                    //flagMesh = true;
-                    currentStatus = "粒子材质复制完成";
-                });
-            }
-            EditorGUILayout.Space();
-    
-            // 步骤4: 处理粒子网格
-           
-            //EditorGUILayout.LabelField("# 处理粒子网格", EditorStyles.boldLabel);
-            if (GUILayout.Button("复制粒子网格"))
-            {
-                if (rootPrefab == null)
-                {
-                    EditorUtility.DisplayDialog("错误", "请指定复制的预制体", "确定");
-                    EditorGUILayout.EndVertical();
-                    return;
-                }
-                
-                if (!IsGameObjectInScene(rootPrefab))
-                {
-                    EditorUtility.DisplayDialog("错误", "此操作只能处理场景中的预制体", "确定");
-                    EditorGUILayout.EndVertical();
-                    return;
-                }
-                
-                if (outputFolder == null)
-                {
-                    EditorUtility.DisplayDialog("错误", "请设置输出文件夹", "确定");
-                    EditorGUILayout.EndVertical();
-                    return;
-                }
-                ExecuteStepWithOptionalDeferredAssetOps(() =>
-                {
-                    FxModelCopyPath = GetStepOutputPath(SubDirMeshes);
-                    ExecuteWithStepTiming("分步-复制粒子网格", () => CopyMeshFromParticle(rootPrefab));
-                    currentStatus = "粒子网格复制完成";
-                });
-            }
-
-            EditorGUILayout.Space();
-
-            // 步骤5: 处理 Image/Text 资源（UI材质/贴图/字体）
-            if (GUILayout.Button("复制Image/Text资源"))
-            {
-                if (rootPrefab == null)
-                {
-                    EditorUtility.DisplayDialog("错误", "请指定复制的预制体", "确定");
-                    EditorGUILayout.EndVertical();
-                    return;
-                }
-
-                if (!IsGameObjectInScene(rootPrefab))
-                {
-                    EditorUtility.DisplayDialog("错误", "此操作只能处理场景中的预制体", "确定");
-                    EditorGUILayout.EndVertical();
-                    return;
-                }
-
-                if (outputFolder == null)
-                {
-                    EditorUtility.DisplayDialog("错误", "请设置输出文件夹", "确定");
-                    EditorGUILayout.EndVertical();
-                    return;
-                }
-
-                ExecuteStepWithOptionalDeferredAssetOps(() =>
-                {
-                    imageTextCopyPath = GetStepOutputPath(SubDirImageText);
-                    LogVerbose($"[ImageText资源] 点击按钮，开始处理: {rootPrefab.name}");
-                    currentStatus = ExecuteWithStepTiming("分步-复制Image/Text资源", () => CopyImageAndTextResources(rootPrefab));
-                    LogVerbose($"[ImageText资源] {currentStatus}");
-                });
-            }
-
-            EditorGUILayout.Space();
-
-            // 步骤6: 复制材质贴图并重定向材质引用
-            if (GUILayout.Button("复制材质贴图"))
-            {
-                if (rootPrefab == null)
-                {
-                    EditorUtility.DisplayDialog("错误", "请指定复制的预制体", "确定");
-                    EditorGUILayout.EndVertical();
-                    return;
-                }
-
-                if (!IsGameObjectInScene(rootPrefab))
-                {
-                    EditorUtility.DisplayDialog("错误", "此操作只能处理场景中的预制体", "确定");
-                    EditorGUILayout.EndVertical();
-                    return;
-                }
-
-                if (outputFolder == null)
-                {
-                    EditorUtility.DisplayDialog("错误", "请设置输出文件夹", "确定");
-                    EditorGUILayout.EndVertical();
-                    return;
-                }
-
-                ExecuteStepWithOptionalDeferredAssetOps(() =>
-                {
-                    string outputPath = AssetDatabase.GetAssetPath(outputFolder);
-                    textureMaterialSourcePath = outputPath;
-                    texturesCopyPath = GetStepOutputPath(SubDirTextures);
-                    currentStatus = ExecuteWithStepTiming("分步-复制材质贴图",
-                        () => CopyTexturesFromMaterials(textureMaterialSourcePath, texturesCopyPath));
-                });
-            }
-
-            EditorGUILayout.Space();
-
-            // 步骤7: 处理 MeshFilter 网格
-            if (GUILayout.Button("复制 MeshFilter 网格"))
-            {
-                if (rootPrefab == null)
-                {
-                    EditorUtility.DisplayDialog("错误", "请指定复制的预制体", "确定");
-                    EditorGUILayout.EndVertical();
-                    return;
-                }
-
-                if (!IsGameObjectInScene(rootPrefab))
-                {
-                    EditorUtility.DisplayDialog("错误", "此操作只能处理场景中的预制体", "确定");
-                    EditorGUILayout.EndVertical();
-                    return;
-                }
-
-                if (outputFolder == null)
-                {
-                    EditorUtility.DisplayDialog("错误", "请设置输出文件夹", "确定");
-                    EditorGUILayout.EndVertical();
-                    return;
-                }
-                ExecuteStepWithOptionalDeferredAssetOps(() =>
-                {
-                    FxModelCopyPath = GetStepOutputPath(SubDirMeshes);
-                    ExecuteWithStepTiming("分步-复制 MeshFilter 网格", () => CopyMeshFromMeshFilter(rootPrefab));
-                    currentStatus = "MeshFilter 网格复制完成";
-                });
-            }
-
-            EditorGUILayout.Space();
-
-            // 步骤8: 处理 Animator / PlayableDirector 动画与 Timeline
-            if (GUILayout.Button("复制动画 Timeline"))
-            {
-                if (rootPrefab == null)
-                {
-                    EditorUtility.DisplayDialog("错误", "请指定复制的预制体", "确定");
-                    EditorGUILayout.EndVertical();
-                    return;
-                }
-
-                if (!IsGameObjectInScene(rootPrefab))
-                {
-                    EditorUtility.DisplayDialog("错误", "此操作只能处理场景中的预制体", "确定");
-                    EditorGUILayout.EndVertical();
-                    return;
-                }
-
-                if (outputFolder == null)
-                {
-                    EditorUtility.DisplayDialog("错误", "请设置输出文件夹", "确定");
-                    EditorGUILayout.EndVertical();
-                    return;
-                }
-                ExecuteStepWithOptionalDeferredAssetOps(() =>
-                {
-                    animationCopyPath = GetStepOutputPath(SubDirAnimations);
-                    ExecuteWithStepTiming("分步-复制动画 Timeline", () => CopyAnimationAndTimeline(rootPrefab));
-                    currentStatus = "动画 Timeline 复制完成";
-                });
-            }
-
-            EditorGUILayout.EndVertical();
-    
-            EditorGUILayout.Space();
-
-            EditorGUILayout.BeginVertical("box");
-            DrawSectionSeparator("保存预制体");
-            rootPrefabCopy = (GameObject)EditorGUILayout.ObjectField("复制后的预制体:", rootPrefabCopy, typeof(GameObject), false);
-            
-            if (GUILayout.Button("保存当前处理预制体"))
-            {
-                ExecuteWithStepTiming("分步-保存当前处理预制体", () => TrySaveCurrentPrefab());
-            }
-            EditorGUILayout.EndVertical();
-            EditorGUILayout.Space();
-    
-            // 重置按钮
-            // if (GUILayout.Button("重置工具"))
-            // {
-            //     ResetTool();
-            // }
-    
-            EditorGUILayout.Space();
-            ToolUi.DrawStatus(currentStatus, MessageType.Info);
+            if (previousInput != CopyInputSignature()) ToolWorkflow.DiscardPreparedPlan(nameof(PrefabCopyTool));
+            ToolWorkflow.DrawSummary(nameof(PrefabCopyTool));
         }
 
         /// <summary>
@@ -604,7 +270,16 @@ namespace ToolSet
         private void SaveAssetsIfNeeded()
         {
             if (deferAssetDatabaseOperations) return;
-            AssetDatabase.SaveAssets();
+            SaveCopiedAssets();
+        }
+
+        private void SaveCopiedAssets()
+        {
+            foreach (string path in copiedPaths)
+            {
+                Object asset = AssetDatabase.LoadMainAssetAtPath(path);
+                if (asset != null) AssetDatabase.SaveAssetIfDirty(asset);
+            }
         }
 
         /// <summary>
@@ -632,7 +307,7 @@ namespace ToolSet
                 {
                     deferAssetDatabaseOperations = false;
                     AssetDatabase.AllowAutoRefresh();
-                    AssetDatabase.SaveAssets();
+                    SaveCopiedAssets();
                     AssetDatabase.Refresh();
                 }
             }
@@ -833,6 +508,7 @@ namespace ToolSet
                 return targetPath;
             }
 
+            activeTransaction?.CaptureNewFolder(targetPath);
             AssetDatabase.CreateFolder(parentPath, folderName);
             RefreshAssetDatabaseIfNeeded();
             return targetPath;
@@ -871,6 +547,7 @@ namespace ToolSet
         /// <returns>场景中实例化的预制体副本</returns>
         private GameObject CopyRootPrefab()
         {
+            rootPrefabCopy = null;
             rootPrefabCopyPath = CopyChildPrefabs(rootPrefab);
             if (!string.IsNullOrEmpty(rootPrefabCopyPath))
             {
@@ -1610,6 +1287,7 @@ namespace ToolSet
                                 totalCount <= 1 ? 0.5f : (float)i / (totalCount - 1));
                         }
 
+                        activeTransaction?.Capture(task.TargetPath);
                         bool copyResult = AssetDatabase.CopyAsset(task.SourcePath, task.TargetPath);
                         if (copyResult)
                         {
@@ -2076,56 +1754,94 @@ namespace ToolSet
         /// <summary>
         /// 从粒子系统复制网格资源
         /// 仅处理渲染模式为Mesh的粒子系统
-        /// 复制网格资源并更新粒子渲染器的网格引用
+        /// 按源文件去重复制，逐槽更新完整 Mesh 列表（包括同一 FBX 中的多个子 Mesh）
         /// </summary>
         /// <param name="instance">场景中的预制体实例</param>
         private void CopyMeshFromParticle(GameObject instance)
         {
-            // 获取所有粒子系统组件
             var particles = instance.GetComponentsInChildren<ParticleSystem>(true);
-            // 记录已复制的网格GUID，避免重复复制
-            HashSet<string> sourceMeshIDs = new HashSet<string>();
+            var copiedPaths = new Dictionary<string, string>();
+            var copiedMeshesByPath = new Dictionary<string, Mesh[]>();
+            var meshReplacements = new Dictionary<Mesh, Mesh>();
             List<string> excludePaths = BuildExcludePaths("粒子网格");
 
-            string copyFilePath = "";
             EditorUtility.DisplayProgressBar("处理中", "正在复制粒子网格...", 0.9f);
     
             try
             {
                 foreach (ParticleSystem particle in particles)
                 {
-                    string meshPath = FindMeshInParticleSystem(particle);
-    
-                    if (string.IsNullOrEmpty(meshPath))
+                    var renderer = particle.GetComponent<ParticleSystemRenderer>();
+                    if (renderer == null || renderer.renderMode != ParticleSystemRenderMode.Mesh || renderer.meshCount == 0)
+                    {
                         continue;
-                    if (IsAssetPathExcluded(meshPath, excludePaths))
-                    {
-                        continue; // 跳过排除目录中的网格
                     }
-    
-                    string id = AssetDatabase.AssetPathToGUID(meshPath);
-    
-                    if (sourceMeshIDs.Contains(id))
+
+                    var meshes = new Mesh[renderer.meshCount];
+                    int meshCount = renderer.GetMeshes(meshes);
+                    bool changed = false;
+                    for (int i = 0; i < meshCount; i++)
                     {
-                        copyFilePath = GenerateCopyPath(AssetDatabase.LoadAssetAtPath(meshPath, typeof(Object)), FxModelCopyPath);
-                        ReplaceParticleMesh(particle, copyFilePath);
-                        
-    
-                    }   
-                    else if (meshPath != null && id != null)
-                    {
-                        copyFilePath = CopyAssets(AssetDatabase.LoadAssetAtPath(meshPath, typeof(Object)), FxModelCopyPath);
-    
-                        if (!string.IsNullOrEmpty(copyFilePath))
+                        Mesh sourceMesh = meshes[i];
+                        if (sourceMesh == null) continue;
+
+                        string sourcePath = AssetDatabase.GetAssetPath(sourceMesh);
+                        if (string.IsNullOrEmpty(sourcePath) || IsAssetPathExcluded(sourcePath, excludePaths) ||
+                            IsPathInFolderOrSubFolder(sourcePath, FxModelCopyPath))
                         {
-                            string copyId = AssetDatabase.AssetPathToGUID(copyFilePath);
-                            sourceMeshIDs.Add(id);
-                            ReplaceParticleMesh(particle, copyFilePath);
+                            continue;
                         }
-                       
-    
+
+                        if (!meshReplacements.TryGetValue(sourceMesh, out Mesh copiedMesh))
+                        {
+                            // 同一模型的不同子 Mesh 共用一份文件副本，不能按槽位重复复制。
+                            if (!copiedPaths.TryGetValue(sourcePath, out string copiedPath))
+                            {
+                                copiedPath = CopyAssets(AssetDatabase.LoadMainAssetAtPath(sourcePath), FxModelCopyPath);
+                                copiedPaths[sourcePath] = copiedPath;
+                            }
+
+                            if (!string.IsNullOrEmpty(copiedPath))
+                            {
+                                if (!copiedMeshesByPath.TryGetValue(copiedPath, out Mesh[] copiedMeshes))
+                                {
+                                    copiedMeshes = AssetDatabase.LoadAllAssetsAtPath(copiedPath).OfType<Mesh>().ToArray();
+                                    copiedMeshesByPath[copiedPath] = copiedMeshes;
+                                }
+
+                                copiedMesh = FindMatchingParticleMesh(sourceMesh, copiedMeshes);
+                            }
+
+                            meshReplacements[sourceMesh] = copiedMesh;
+                        }
+
+                        if (copiedMesh == null)
+                        {
+                            Debug.LogWarning($"[粒子网格] '{particle.name}' 的 Mesh[{i}] '{sourceMesh.name}' 未找到对应副本，保留原引用: {sourcePath}");
+                            continue;
+                        }
+
+                        meshes[i] = copiedMesh;
+                        changed = true;
                     }
-                  
+
+                    if (!changed) continue;
+
+                    // SetMeshes 一次写回完整列表，保留槽位顺序、重复引用及原有抽取权重。
+                    var weightings = new float[renderer.meshCount];
+                    int weightingCount = renderer.GetMeshWeightings(weightings);
+                    Undo.RecordObject(renderer, "Copy Particle Meshes");
+                    renderer.SetMeshes(meshes, meshCount);
+                    if (weightingCount > 0)
+                    {
+                        renderer.SetMeshWeightings(weightings, weightingCount);
+                    }
+
+                    EditorUtility.SetDirty(renderer);
+                    if (PrefabUtility.IsPartOfPrefabInstance(renderer))
+                    {
+                        PrefabUtility.RecordPrefabInstancePropertyModifications(renderer);
+                    }
                 }
                 
                 RefreshAssetDatabaseIfNeeded();
@@ -2147,9 +1863,9 @@ namespace ToolSet
         ///   原因：mesh 引用已在"复制预制体"阶段通过整体复制 + GUID 替换正确指向新 .fbx
         ///        若再处理会被替换为另一个独立副本，破坏模型整体复制的引用链
         /// 
-        /// 模型文件 mesh 复制逻辑参考 ReplaceParticleMesh：
+        /// 模型文件 mesh 复制逻辑：
         ///   - 副本是独立 mesh 资源 → 直接加载赋值
-        ///   - 副本是模型文件 → 按原 mesh 名称匹配模型内对应子 mesh
+        ///   - 副本是模型文件 → 按子资源 fileID 匹配，唯一同名网格作为后备
         /// </summary>
         /// <param name="instance">场景中的预制体实例（根预制体）</param>
         private void CopyMeshFromMeshFilter(GameObject instance)
@@ -2221,47 +1937,21 @@ namespace ToolSet
         }
 
         /// <summary>
-        /// 替换 MeshFilter 的 mesh 引用（处理逻辑参考 ReplaceParticleMesh）
-        /// 兼容两种副本形态：
-        ///   1. 副本是独立的 .mesh / .asset 文件 → 直接加载并赋值
-        ///   2. 副本是模型文件（.fbx 等） → 从中按原 mesh 名称匹配对应子 mesh
+        /// 替换 MeshFilter 的 mesh 引用
+        /// 从副本的全部 Mesh 子资源中匹配，包含仅用于蒙皮渲染器的网格。
         /// </summary>
         /// <param name="filter">需要更新引用的 MeshFilter</param>
         /// <param name="meshPath">复制后资源的路径</param>
         private void ReplaceMeshFilterMesh(MeshFilter filter, string meshPath)
         {
-            var loaded = AssetDatabase.LoadAssetAtPath(meshPath, typeof(Object));
-            if (loaded == null)
-            {
-                Debug.LogError($"[MeshFilter网格] 副本加载失败: {meshPath}");
-                return;
-            }
-
-            // 情况 1：独立 mesh 资源
-            if (loaded is Mesh meshAsset)
-            {
-                filter.sharedMesh = meshAsset;
-                LogVerbose($"[MeshFilter网格] 网格替换成功: {filter.name} -> {meshPath}");
-                return;
-            }
-
-            // 情况 2：模型文件（GameObject 根），按原 mesh 名匹配子 mesh
-            if (loaded is GameObject modelGo)
-            {
-                Mesh originalMesh = filter.sharedMesh;
-                var filtersInModel = modelGo.GetComponentsInChildren<MeshFilter>(true);
-                foreach (var f in filtersInModel)
-                {
-                    if (f.sharedMesh != null && originalMesh != null
-                        && f.sharedMesh.name == originalMesh.name)
-                    {
-                        filter.sharedMesh = f.sharedMesh;
-                        LogVerbose($"[MeshFilter网格] 从模型中匹配网格成功: {filter.name} -> {f.sharedMesh.name}");
-                        return;
-                    }
-                }
-                Debug.LogWarning($"[MeshFilter网格] 模型 {meshPath} 中未找到与 '{originalMesh?.name}' 同名的子 mesh");
-            }
+            var meshes = AssetDatabase.LoadAllAssetsAtPath(meshPath).OfType<Mesh>().ToArray();
+            var replacement = FindMatchingParticleMesh(filter.sharedMesh, meshes);
+            if (replacement == null) throw new System.IO.IOException($"[MeshFilter网格] 无法确定 '{filter.sharedMesh?.name}' 对应的副本网格：{meshPath}");
+            Undo.RecordObject(filter, "Copy MeshFilter Mesh");
+            filter.sharedMesh = replacement;
+            EditorUtility.SetDirty(filter);
+            if (PrefabUtility.IsPartOfPrefabInstance(filter)) PrefabUtility.RecordPrefabInstancePropertyModifications(filter);
+            LogVerbose($"[MeshFilter网格] 网格替换成功: {filter.name} -> {meshPath}");
         }
 
         #endregion
@@ -2605,27 +2295,15 @@ namespace ToolSet
         /// </summary>
         private string CopyAssetAtPath(string assetPath, string parentFolder)
         {
-            if (string.IsNullOrEmpty(assetPath)) return null;
-
+            if (string.IsNullOrEmpty(assetPath)) throw new System.InvalidOperationException("源资源路径为空");
             string targetPath = GenerateCopyPathFromAssetPath(assetPath, parentFolder);
-            if (string.IsNullOrEmpty(targetPath)) return null;
-
-            string fullPath = GetFullAssetPath(targetPath);
-            if (File.Exists(fullPath))
-            {
-                LogVerbose($"[资源复制] 文件已存在，跳过: {targetPath}");
-                return targetPath;
-            }
-
-            bool success = AssetDatabase.CopyAsset(assetPath, targetPath);
-            if (success)
-            {
-                LogVerbose($"[资源复制] 复制成功: {targetPath}");
-                return targetPath;
-            }
-
-            Debug.LogError($"[资源复制] 复制失败: {assetPath} -> {targetPath}");
-            return null;
+            if (copiedPaths.Contains(targetPath) && File.Exists(targetPath)) return targetPath;
+            if (File.Exists(targetPath)) throw new System.IO.IOException("目标文件在预览后被占用：" + targetPath);
+            activeTransaction?.Capture(targetPath);
+            if (!AssetDatabase.CopyAsset(assetPath, targetPath)) throw new System.IO.IOException("复制失败：" + assetPath);
+            copiedPaths.Add(targetPath);
+            AssetDatabase.ImportAsset(targetPath, ImportAssetOptions.ForceSynchronousImport);
+            return targetPath;
         }
 
         /// <summary>
@@ -3197,10 +2875,7 @@ namespace ToolSet
         private string GenerateCopyPathFromAssetPath(string assetPath, string parentFolder)
         {
             if (string.IsNullOrEmpty(assetPath)) return null;
-
-            string fileName = Path.GetFileNameWithoutExtension(assetPath);
-            string extension = Path.GetExtension(assetPath);
-            return parentFolder + "/" + fileName + "_Copy" + extension;
+            return copyPaths.Reserve(assetPath, parentFolder);
         }
 
         /// <summary>
@@ -3302,47 +2977,8 @@ namespace ToolSet
         /// <returns>复制后的资源路径，失败返回null</returns>
         private string CopyAssets(Object asset, string parentFolder)
         {
-            if (asset == null)
-            {
-                Debug.LogError("[资源复制] 资源对象为空！");
-                return null;
-            }
-    
-            string assetPath = AssetDatabase.GetAssetPath(asset);
-            if (string.IsNullOrEmpty(assetPath))
-            {
-                Debug.LogError($"[资源复制] 无法获取资源路径: {asset.name}");
-                return null;
-            }
-    
-            // 定义新资源的路径
-            string targetPath = GenerateCopyPath(asset, parentFolder);
-            if (string.IsNullOrEmpty(targetPath))
-            {
-                return null;
-            }
-    
-            string fullPath = Application.dataPath.Substring(0, Application.dataPath.Length - "Assets".Length) + targetPath;
-    
-            // 检查目标路径是否已存在 - 如果存在则跳过复制
-            if (File.Exists(fullPath))
-            {
-                LogVerbose($"[资源复制] 文件已存在，跳过: {targetPath}");
-                return targetPath;
-            }
-    
-            // 复制资源
-            bool success = AssetDatabase.CopyAsset(assetPath, targetPath);
-            if (success)
-            {
-                LogVerbose($"[资源复制] 复制成功: {targetPath}");
-                return targetPath;
-            }
-            else
-            {
-                Debug.LogError($"[资源复制] 复制失败: {assetPath} -> {targetPath}");
-                return null;
-            }
+            if (asset == null) throw new System.InvalidOperationException("复制资源为空");
+            return CopyAssetAtPath(AssetDatabase.GetAssetPath(asset), parentFolder);
         }
         
         /// <summary>
@@ -3359,62 +2995,16 @@ namespace ToolSet
         /// <returns>复制后的预制体路径</returns>
         private string ReplaceUID(GameObject prefab, Dictionary<string, string> idDictionary)
         {
-            string path = AssetDatabase.GetAssetPath(prefab);
-            if (string.IsNullOrEmpty(path))
+            string copy = CopyAssets(prefab, newFolderPath);
+            if (idDictionary != null && idDictionary.Count > 0)
             {
-                Debug.LogError("[GUID替换] 无法获取预制体路径");
-                return null;
+                string content = File.ReadAllText(copy);
+                string replaced = ReferenceRepair.Reference.Replace(content, m =>
+                    idDictionary.TryGetValue(m.Groups["guid"].Value, out var guid) ? m.Value.Replace(m.Groups["guid"].Value, guid) : m.Value);
+                File.WriteAllText(copy, replaced);
+                AssetDatabase.ImportAsset(copy, ImportAssetOptions.ForceSynchronousImport);
             }
-
-            // 将Assets相对路径转换为系统绝对路径
-            string fullPath = Application.dataPath.Substring(0, Application.dataPath.Length - "Assets".Length) + path;
-            LogVerbose($"[GUID替换] 处理文件: {fullPath}");
-    
-            if (!File.Exists(fullPath))
-            {
-                Debug.LogError($"[GUID替换] 文件不存在: {fullPath}");
-                return null;
-            }
-    
-            string[] content = File.ReadAllLines(fullPath);
-    
-            string copyFilePath = GenerateCopyPath(prefab, newFolderPath);
-            if (string.IsNullOrEmpty(copyFilePath))
-            {
-                return null;
-            }
-            
-            //如果不存在子预制体，则直接将原文件内容写入新文件
-            if (idDictionary == null || idDictionary.Count == 0)
-            {
-                
-                File.WriteAllLines(copyFilePath, content);
-                AssetDatabase.ImportAsset(copyFilePath, ImportAssetOptions.ForceSynchronousImport);
-                return copyFilePath;
-            }
-            else
-            {
-                List<string> replaceContent = new List<string>();
-                foreach (string line in content)
-                {
-                    string current = line;
-                    foreach (var ids in idDictionary)
-                    {
-                        if (line.Contains(ids.Key))
-                        {
-                            current = line.Replace(ids.Key, ids.Value);
-                            break;
-                        }
-                    }
-    
-                    replaceContent.Add(current);
-                }
-    
-                File.WriteAllLines(copyFilePath, replaceContent);
-            }
-    
-            AssetDatabase.ImportAsset(copyFilePath, ImportAssetOptions.ForceSynchronousImport);
-            return copyFilePath;
+            return copy;
         }
         
         /// <summary>
@@ -3459,102 +3049,34 @@ namespace ToolSet
         #region 粒子网格处理方法
         
         /// <summary>
-        /// 在粒子系统中查找使用的网格
-        /// 仅当粒子渲染模式为Mesh时才有效
+        /// 从复制文件的全部子资源中匹配 Mesh，优先使用保留的 local fileID。
+        /// 兼容旧副本时只接受唯一同名 Mesh，避免同名子 Mesh 被错误替换。
         /// </summary>
-        /// <param name="particleSystem">粒子系统组件</param>
-        /// <returns>网格资源的路径，未找到返回null</returns>
-        private string FindMeshInParticleSystem(ParticleSystem particleSystem)
+        private static Mesh FindMatchingParticleMesh(Mesh sourceMesh, Mesh[] copiedMeshes)
         {
-            Mesh foundMesh = null;
-            string sourceAssetPath = null;
-    
-            var renderer = particleSystem.GetComponent<ParticleSystemRenderer>();
-            if (renderer == null)
+            bool hasSourceId = AssetDatabase.TryGetGUIDAndLocalFileIdentifier(sourceMesh, out _, out long sourceId);
+            Mesh nameMatch = null;
+            int nameMatchCount = 0;
+            foreach (Mesh candidate in copiedMeshes)
             {
-                // 此粒子系统没有渲染器组件，静默跳过
-                return null;
-            }
-    
-            // 获取Renderer使用的Mesh
-            if (renderer.renderMode == ParticleSystemRenderMode.Mesh)
-            {
-                foundMesh = renderer.mesh;
-            }
-    
-            if (foundMesh == null)
-            {
-                // 渲染模式非Mesh或未设置网格，静默跳过
-                return null;
-            }
-    
-            // 查找Mesh的源文件路径
-            sourceAssetPath = AssetDatabase.GetAssetPath(foundMesh);
+                if (candidate == null) continue;
 
-           
-            if (string.IsNullOrEmpty(sourceAssetPath))
-            {
-                Debug.LogWarning($"[粒子网格] 无法获取网格资源路径: {foundMesh.name}");
-                return null;
-            }
-    
-            return sourceAssetPath;
-        }
-        
-        /// <summary>
-        /// 替换粒子系统的网格引用
-        /// 处理两种情况：
-        /// 1. 网格是独立的.mesh文件 - 直接加载并替换
-        /// 2. 网格是模型文件（如.fbx）的子资源 - 遍历模型中的MeshFilter查找同名网格
-        /// </summary>
-        /// <param name="particle">粒子系统组件</param>
-        /// <param name="meshPath">新网格资源的路径</param>
-        private void ReplaceParticleMesh(ParticleSystem particle, string meshPath)
-        {
-            string type = Path.GetExtension(meshPath);
-            var renderer = particle.GetComponent<ParticleSystemRenderer>();
-           
-            if (renderer == null)
-            {
-                Debug.LogError($"[粒子网格] 渲染器为空: {particle.name}");
-                return;
-            }
-            
-            // 仅处理Mesh渲染模式的粒子
-            if (renderer.renderMode == ParticleSystemRenderMode.Mesh)
-            {
-                var mesh = AssetDatabase.LoadAssetAtPath(meshPath, typeof(Object));
-                var foundMesh = renderer.mesh; // 当前使用的网格，用于名称匹配
-                
-                // 情况1：资源本身就是Mesh类型
-                if (mesh is Mesh)
+                // 独立 Mesh 主资源可能随副本文件名改名，fileID 匹配不能依赖名称相同。
+                if (hasSourceId && sourceId != 0 &&
+                    AssetDatabase.TryGetGUIDAndLocalFileIdentifier(candidate, out _, out long candidateId) &&
+                    candidateId == sourceId)
                 {
-                    renderer.mesh = (Mesh)mesh;
-                    LogVerbose($"[粒子网格] 网格替换成功: {particle.name}");
+                    return candidate;
                 }
-                else
+
+                if (candidate.name == sourceMesh.name)
                 {
-                    // 情况2：资源是模型文件（如FBX），需要从中提取网格
-                    var model = mesh as GameObject;
-                    var filters = model.GetComponentsInChildren<MeshFilter>();
-                    if (filters == null)
-                    {
-                        Debug.LogError($"[粒子网格] 模型中无MeshFilter: {meshPath}");
-                        return;
-                    }
-                    
-                    // 遍历模型中的所有MeshFilter，找到同名网格
-                    foreach (var filter in filters)
-                    {
-                        var filterMesh = filter.sharedMesh;
-                        if (filterMesh.name == foundMesh.name)
-                        {
-                            renderer.mesh = filterMesh;
-                            LogVerbose($"[粒子网格] 从模型中匹配网格成功: {filterMesh.name}");
-                        }
-                    }
+                    nameMatch = candidate;
+                    nameMatchCount++;
                 }
             }
+
+            return nameMatchCount == 1 ? nameMatch : null;
         }
         
         #endregion
@@ -3573,35 +3095,13 @@ namespace ToolSet
         /// <param name="parent">预制体实例的Transform</param>
         private void ApplyModificationsRecursively(Transform parent)
         {
-            if(PrefabUtility.IsAnyPrefabInstanceRoot(parent.gameObject))
-            {
-                PrefabUtility.ApplyPrefabInstance(parent.gameObject, InteractionMode.AutomatedAction);
-                PrefabUtility.UnpackPrefabInstance(parent.gameObject, PrefabUnpackMode.OutermostRoot, InteractionMode.AutomatedAction);
-                LogVerbose($"[预制体保存] 已应用并解包: {parent.name}");
-            }
-            else
-            {
-                Debug.LogWarning($"[预制体保存] '{parent.name}' 不是预制体实例，跳过处理");
-                return;
-            }
-            
-            foreach (Transform child in parent.GetComponentsInChildren<Transform>(true))
-            {
-                if (child.gameObject == parent.gameObject)
-                    continue;
-                
-                if(PrefabUtility.IsAnyPrefabInstanceRoot(child.gameObject))
-                {
-                    GameObject prefabRoot = PrefabUtility.GetCorrespondingObjectFromSource(child.gameObject);
-                    string childPath = AssetDatabase.GetAssetPath(prefabRoot);
-                    
-                    if (Path.GetExtension(childPath) == ".prefab")
-                    {   
-                        LogVerbose($"[预制体保存] 递归处理子预制体: {child.name}");
-                        ApplyModificationsRecursively(child.transform);
-                    }
-                }
-            }
+            string path = PrefabUtility.GetPrefabAssetPathOfNearestInstanceRoot(parent.gameObject);
+            if (string.IsNullOrEmpty(rootPrefabCopyPath) || path != rootPrefabCopyPath)
+                throw new System.InvalidOperationException("只能保存本次工具生成的根预制体副本，请先复制。");
+            activeTransaction?.Capture(path);
+            PrefabUtility.SaveAsPrefabAsset(parent.gameObject, path, out bool success);
+            if (!success) throw new System.IO.IOException("保存预制体副本失败：" + path);
+            // Nested prefab overrides live in this root; never apply/unpack shared child assets.
         }
         
         #endregion

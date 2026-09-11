@@ -96,6 +96,8 @@ namespace ToolSet
         private Vector2 targetScroll;
         private Vector2 resultScroll;
 
+        private string resultFilter = "";
+        private int resultPage;
         private TextAsset recordAsset;
         private string recordExternalPath = string.Empty;
         private string statusMessage = "等待操作";
@@ -274,6 +276,7 @@ namespace ToolSet
                     if (!string.IsNullOrEmpty(selectedPath))
                     {
                         recordExternalPath = selectedPath;
+                        recordAsset = null;
                         statusMessage = $"已选择记录文件：{Path.GetFileName(selectedPath)}";
                     }
                 }
@@ -298,7 +301,13 @@ namespace ToolSet
             {
                 if (GUILayout.Button("为丢失项搜索候选资源"))
                 {
-                    SearchCandidatesForMissing(lastReport, candidateMaxCount);
+                    EditorApplication.delayCall += () =>
+                    {
+                        try { SearchCandidatesForMissing(lastReport, candidateMaxCount); statusMessage = "候选搜索完成"; }
+                        catch (OperationCanceledException) { statusMessage = "候选搜索已取消"; }
+                        catch (Exception e) { statusMessage = e.Message; }
+                        finally { EditorUtility.ClearProgressBar(); }
+                    };
                 }
 
                 if (GUILayout.Button("导出丢失报告(CSV)"))
@@ -315,8 +324,12 @@ namespace ToolSet
             repairExpandRootDependencies = EditorGUILayout.ToggleLeft("修复时扩展扫描根对象依赖链", repairExpandRootDependencies);
             DrawLargeHint("结果列表按卡片分组显示：每项包含状态、资源类型、基础信息、引用来源与候选修复区。", MessageType.None);
 
+            resultFilter = EditorGUILayout.TextField("筛选名称或路径", resultFilter);
+            var visible = lastReport.items.Where(i => (!onlyShowMissing || i.state == DependencyState.Missing) &&
+                ((i.fileName ?? "").IndexOf(resultFilter, StringComparison.OrdinalIgnoreCase) >= 0 || (i.originalPath ?? "").IndexOf(resultFilter, StringComparison.OrdinalIgnoreCase) >= 0)).ToList();
+            ToolUi.DrawPager(ref resultPage, visible.Count, 30);
             resultScroll = EditorGUILayout.BeginScrollView(resultScroll, GUILayout.Height(320));
-            foreach (DependencyCheckItem item in lastReport.items)
+            foreach (DependencyCheckItem item in visible.Skip(resultPage * 30).Take(30))
             {
                 if (onlyShowMissing && item.state != DependencyState.Missing)
                 {
@@ -400,7 +413,7 @@ namespace ToolSet
             if (item.state == DependencyState.Missing && item.candidatePaths != null && item.candidatePaths.Count > 0)
             {
                 EditorGUILayout.LabelField("候选资源（可定位 / 可修复）", EditorStyles.miniBoldLabel);
-                foreach (string candidate in item.candidatePaths)
+                foreach (string candidate in item.candidatePaths.ToArray())
                 {
                     using (new EditorGUILayout.HorizontalScope())
                     {
@@ -663,7 +676,7 @@ namespace ToolSet
             HashSet<string> excludedExtensions = ParseExcludeExtensions();
             HashSet<string> rootSet = new(rootPaths);
             Dictionary<string, HashSet<string>> referencedByMap = BuildReferencedByMap(rootPaths);
-            string[] allDependencies = AssetDatabase.GetDependencies(rootPaths.ToArray(), true);
+            string[] allDependencies = referencedByMap.Keys.Concat(rootPaths).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
 
             DependencyRecordFile data = new()
             {
@@ -716,7 +729,7 @@ namespace ToolSet
             Dictionary<string, HashSet<string>> map = new();
             foreach (string rootPath in rootPaths)
             {
-                string[] dependencies = AssetDatabase.GetDependencies(rootPath, true);
+                string[] dependencies = ToolAssetCache.Dependencies(rootPath, true);
                 foreach (string dep in dependencies)
                 {
                     if (!map.TryGetValue(dep, out HashSet<string> refs))
@@ -859,6 +872,12 @@ namespace ToolSet
 
         private void ParseAndCheck()
         {
+            try { ParseAndCheckCore(); }
+            catch (Exception e) { statusMessage = "读取或检查失败：" + e.Message; Debug.LogException(e); }
+            finally { EditorUtility.ClearProgressBar(); }
+        }
+        private void ParseAndCheckCore()
+        {
             string json = GetRecordJsonContent(out string sourceName);
             if (string.IsNullOrEmpty(json))
             {
@@ -911,6 +930,12 @@ namespace ToolSet
 
         private static DependencyCheckReport BuildCheckReport(DependencyRecordFile data, string sourceFileName)
         {
+            var movedRoots = (data.roots ?? new List<AssetRecordItem>()).Where(r => r != null && !string.IsNullOrEmpty(r.path))
+                .GroupBy(r => r.path, StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(g => g.Key, g => {
+                    string current = AssetDatabase.GUIDToAssetPath(g.First().guid);
+                    return string.IsNullOrEmpty(current) ? g.Key : current;
+                }, StringComparer.OrdinalIgnoreCase);
             DependencyCheckReport report = new()
             {
                 sourceFileName = sourceFileName,
@@ -918,12 +943,12 @@ namespace ToolSet
                     ? new List<string>()
                     : data.roots
                         .Where(r => !string.IsNullOrEmpty(r.path))
-                        .Select(r => r.path)
+                        .Select(r => movedRoots.TryGetValue(r.path, out var current) ? current : r.path)
                         .Distinct(StringComparer.OrdinalIgnoreCase)
                         .ToList()
             };
 
-            foreach (DependencyRecordItem dep in data.dependencies)
+            foreach (DependencyRecordItem dep in data.dependencies.Where(d => d != null))
             {
                 DependencyCheckItem item = new()
                 {
@@ -932,7 +957,7 @@ namespace ToolSet
                     guid = dep.guid,
                     note = string.Empty,
                     isDirectoryChanged = false,
-                    referencedByRoots = dep.referencedByRoots ?? new List<string>()
+                    referencedByRoots = (dep.referencedByRoots ?? new List<string>()).Select(p => movedRoots.TryGetValue(p, out var current) ? current : p).ToList()
                 };
 
                 if (dep.isBuiltIn)
@@ -1106,8 +1131,10 @@ namespace ToolSet
         private static void SearchCandidatesForMissing(DependencyCheckReport report, int maxCount)
         {
             int validMax = Mathf.Max(1, maxCount);
+            int index = 0;
             foreach (DependencyCheckItem item in report.items)
             {
+                if (EditorUtility.DisplayCancelableProgressBar("搜索候选资源", item.fileName, (float)index++ / Math.Max(1, report.items.Count))) throw new OperationCanceledException();
                 item.candidatePaths.Clear();
                 if (item.state != DependencyState.Missing || string.IsNullOrWhiteSpace(item.fileName))
                 {
@@ -1120,7 +1147,7 @@ namespace ToolSet
                     continue;
                 }
 
-                string[] guids = AssetDatabase.FindAssets(nameWithoutExt);
+                string[] guids = ToolAssetCache.FindNamed(nameWithoutExt);
                 foreach (string guid in guids)
                 {
                     string candidatePath = AssetDatabase.GUIDToAssetPath(guid);
@@ -1132,7 +1159,7 @@ namespace ToolSet
                     string candidateFileName = Path.GetFileName(candidatePath);
                     bool sameName = string.Equals(candidateFileName, item.fileName, StringComparison.OrdinalIgnoreCase);
                     bool sameNameWithoutExt = string.Equals(Path.GetFileNameWithoutExtension(candidatePath), nameWithoutExt, StringComparison.OrdinalIgnoreCase);
-                    if (!sameName && !sameNameWithoutExt)
+                    if (AssetDatabase.IsValidFolder(candidatePath) || !string.Equals(Path.GetExtension(candidatePath), Path.GetExtension(item.fileName), StringComparison.OrdinalIgnoreCase) || (!sameName && !sameNameWithoutExt))
                     {
                         continue;
                     }
@@ -1165,125 +1192,20 @@ namespace ToolSet
 
         private void TryRepairMissingReference(DependencyCheckItem item, string candidatePath)
         {
-            if (item == null || string.IsNullOrWhiteSpace(candidatePath))
+            ToolWorkflow.Preview(() =>
             {
-                return;
-            }
-
-            if (item.state != DependencyState.Missing)
-            {
-                EditorUtility.DisplayDialog("提示", "当前项不是丢失引用，无需修复。", "确定");
-                return;
-            }
-
-            if (string.IsNullOrWhiteSpace(item.guid))
-            {
-                EditorUtility.DisplayDialog("提示", "该丢失项没有 GUID，暂时无法自动修复。", "确定");
-                return;
-            }
-
-            string candidateGuid = AssetDatabase.AssetPathToGUID(candidatePath);
-            if (string.IsNullOrWhiteSpace(candidateGuid))
-            {
-                EditorUtility.DisplayDialog("提示", "候补资源 GUID 无效，无法修复。", "确定");
-                return;
-            }
-
-            if (candidateGuid == item.guid)
-            {
-                EditorUtility.DisplayDialog("提示", "候补资源与缺失 GUID 相同，不需要修复。", "确定");
-                return;
-            }
-
-            bool confirm = EditorUtility.DisplayDialog(
-                "确认修复引用",
-                $"将把引用 GUID\n{item.guid}\n替换为\n{candidateGuid}\n\n候补资源：{candidatePath}\n\n仅会修改可文本处理的资产文件。",
-                "确认修复",
-                "取消");
-            if (!confirm)
-            {
-                return;
-            }
-
-            List<string> targetAssetPaths = CollectRepairTargetAssetPaths(item);
-            if (targetAssetPaths.Count == 0)
-            {
-                EditorUtility.DisplayDialog("提示", "没有找到可尝试修复的目标资源。", "确定");
-                return;
-            }
-
-            int changedCount = 0;
-            int scannedCount = 0;
-            List<string> changedAssetPaths = new();
-            for (int i = 0; i < targetAssetPaths.Count; i++)
-            {
-                string assetPath = targetAssetPaths[i];
-                if (!IsSupportedRepairFile(assetPath))
+                rootDependencyScopeCache.Clear();
+                var plan = ReferenceRepair.Build("修复缺失引用", item.guid, item.originalPath, candidatePath, CollectRepairTargetAssetPaths(item));
+                plan.completed = () =>
                 {
-                    continue;
-                }
-
-                string absolutePath = ToAbsolutePath(assetPath);
-                if (!File.Exists(absolutePath))
-                {
-                    continue;
-                }
-
-                scannedCount++;
-                string content = File.ReadAllText(absolutePath, Encoding.UTF8);
-                if (!content.Contains(item.guid))
-                {
-                    continue;
-                }
-
-                string replaced = content.Replace(item.guid, candidateGuid);
-                if (ReferenceEquals(content, replaced) || content == replaced)
-                {
-                    continue;
-                }
-
-                File.WriteAllText(absolutePath, replaced, new UTF8Encoding(false));
-                changedAssetPaths.Add(assetPath);
-                changedCount++;
-            }
-
-            if (changedAssetPaths.Count > 0)
-            {
-                AssetDatabase.StartAssetEditing();
-                try
-                {
-                    for (int i = 0; i < changedAssetPaths.Count; i++)
-                    {
-                        AssetDatabase.ImportAsset(changedAssetPaths[i], ImportAssetOptions.ForceUpdate);
-                    }
-                }
-                finally
-                {
-                    AssetDatabase.StopAssetEditing();
-                }
-            }
-
-            AssetDatabase.Refresh(ImportAssetOptions.ForceUpdate);
-            string result = $"扫描 {scannedCount} 个资源，修复 {changedCount} 个。";
-            if (changedCount > 0)
-            {
-                item.state = DependencyState.Present;
-                item.currentPath = candidatePath;
-                item.guid = candidateGuid;
-                item.candidatePaths.Clear();
-                statusMessage = $"修复完成：{item.fileName} -> {Path.GetFileName(candidatePath)}";
-            }
-            else
-            {
-                statusMessage = "未找到可替换的引用片段";
-            }
-
-            EditorUtility.DisplayDialog("修复结果", result, "确定");
-            if (lastReport != null)
-            {
-                lastReport.presentCount = lastReport.items.Count(v => v.state == DependencyState.Present);
-                lastReport.missingCount = lastReport.items.Count(v => v.state == DependencyState.Missing);
-            }
+                    rootDependencyScopeCache.Clear();
+                    // The saved record still refers to the old GUID: retain its identity for subsequent audits.
+                    item.note = "已将预览内的引用替换为 " + candidatePath + "；请重新导出记录以更新依赖基线";
+                    item.candidatePaths.Clear();
+                    statusMessage = item.note;
+                };
+                return plan;
+            });
         }
 
         private List<string> CollectRepairTargetAssetPaths(DependencyCheckItem item)
@@ -1352,7 +1274,7 @@ namespace ToolSet
                 return cached;
             }
 
-            string[] dependencies = AssetDatabase.GetDependencies(rootPath, true);
+            string[] dependencies = ToolAssetCache.Dependencies(rootPath, true);
             List<string> list = dependencies
                 .Where(IsSupportedRepairFile)
                 .Distinct(StringComparer.OrdinalIgnoreCase)
@@ -1376,6 +1298,7 @@ namespace ToolSet
 
             foreach (string absolutePath in Directory.EnumerateFiles(assetsAbsolutePath, "*.*", SearchOption.AllDirectories))
             {
+                if (EditorUtility.DisplayCancelableProgressBar("查找引用文件", absolutePath, 0.5f)) throw new OperationCanceledException();
                 string extension = Path.GetExtension(absolutePath);
                 if (!RepairSupportedExtensions.Contains(extension))
                 {

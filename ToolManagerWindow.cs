@@ -1,65 +1,76 @@
-using System.Collections;
+using System;
 using System.Collections.Generic;
 using UnityEditor;
 using UnityEngine;
 using ToolSet;
+
 public class ToolManagerWindow : EditorWindow
 {
-    private int currentTab = 0;
-    private readonly string[] tabNames = { "预制体复制", "依赖记录检查", "非法引用查询", "贴图复制", "批量重命名", "材质、预制体映射", "批量修改模型导入设置" };
-
-    // 缓存每个工具的实例（避免每次重绘都新建）
-    private readonly Dictionary<int, IToolGUI> toolInstances = new();
-
-    private void OnEnable()
+    int currentTab;
+    readonly Dictionary<int, IToolGUI> tools = new Dictionary<int, IToolGUI>();
+    readonly Vector2[] scroll = new Vector2[7];
+    readonly string[] names = { "预制体复制", "依赖记录检查", "非法引用查询", "贴图迁移", "批量重命名", "预制体与材质映射", "模型导入设置" };
+    string error;
+    void OnEnable()
     {
-        //预创建所有工具实例
-        EnsureToolInstance(0, () => new PrefabCopyTool());
-        EnsureToolInstance(1, () => new DependencyRecordTool());
-        EnsureToolInstance(2, () => new IllegalReferenceTool());
-        EnsureToolInstance(3, () => new MaterialTextureMigrator());
-        EnsureToolInstance(4, () => new BatchRenameTool());
-        EnsureToolInstance(5, () => new PrefabMatProjectTool());
-        EnsureToolInstance(6, () => new BatchChangeModelImport());
+        titleContent = new GUIContent("多功能电饭煲");
+        minSize = new Vector2(760, 620);
+        currentTab = Mathf.Clamp(EditorPrefs.GetInt(ToolPaths.PreferenceKey("Tab")), 0, 6);
+        tools[0] = new PrefabCopyTool(); tools[1] = new DependencyRecordTool(); tools[2] = new IllegalReferenceTool();
+        tools[3] = new MaterialTextureMigrator(); tools[4] = new BatchRenameTool(); tools[5] = new PrefabMatProjectTool(); tools[6] = new BatchChangeModelImport();
+        foreach (var panel in tools.Values) ToolPreferences.Load(panel);
+        Selection.selectionChanged += Invalidate;
+        EditorApplication.projectChanged += Invalidate;
+        EditorApplication.hierarchyChanged += Invalidate;
+        ToolWorkflow.Changed += Repaint;
     }
-
-    private void OnDisable()
+    void OnDisable()
     {
-        // // 清理所有工具
-        // foreach (var tool in toolInstances.Values)
-        // {
-        //     tool.OnDisable();
-        // }
-        toolInstances.Clear();
+        EditorPrefs.SetInt(ToolPaths.PreferenceKey("Tab"), currentTab);
+        Selection.selectionChanged -= Invalidate; EditorApplication.projectChanged -= Invalidate;
+        EditorApplication.hierarchyChanged -= Invalidate; ToolWorkflow.Changed -= Repaint;
+        foreach (var panel in tools.Values) ToolPreferences.Save(panel);
+        tools.Clear();
     }
-
-    private void OnGUI()
+    void Invalidate() { foreach (var panel in tools.Values) (panel as ToolPanel)?.Invalidate(); Repaint(); }
+    void Navigation(string group, params int[] entries)
     {
-        currentTab = GUILayout.Toolbar(currentTab, tabNames, GUILayout.Height(32));
-        EditorGUILayout.Space(6);
-
-        // 获取当前工具实例并绘制
-        if (toolInstances.TryGetValue(currentTab, out var tool))
+        GUILayout.Space(10); GUILayout.Label(group, EditorStyles.miniBoldLabel);
+        foreach (int index in entries)
         {
-            tool.DrawGUI();
+            bool selected = GUILayout.Toggle(currentTab == index, names[index], "Button", GUILayout.Height(29));
+            if (selected && currentTab != index) { currentTab = index; error = null; GUI.FocusControl(null); }
         }
     }
-
-    private void EnsureToolInstance(int index, System.Func<IToolGUI> factory)
+    void OnGUI()
     {
-        if (!toolInstances.ContainsKey(index))
+        using (new EditorGUILayout.HorizontalScope())
         {
-            var instance = factory();
-            //instance.OnEnable(); // 手动触发初始化
-            toolInstances[index] = instance;
+            using (new EditorGUILayout.VerticalScope(EditorStyles.helpBox, GUILayout.Width(155)))
+            {
+                Navigation("复制与迁移", 0, 3, 5); Navigation("检查与修复", 1, 2); Navigation("批量编辑", 4, 6);
+                GUILayout.FlexibleSpace();
+                GUILayout.Label("文件恢复：下方按钮\n场景编辑：Ctrl+Z", EditorStyles.wordWrappedMiniLabel);
+            }
+            using (new EditorGUILayout.VerticalScope())
+            {
+                scroll[currentTab] = EditorGUILayout.BeginScrollView(scroll[currentTab]);
+                try
+                {
+                    using (new EditorGUI.DisabledScope(ToolWorkflow.Running))
+                        if (tools.TryGetValue(currentTab, out var panel)) panel.DrawGUI();
+                    if (!string.IsNullOrEmpty(error)) EditorGUILayout.HelpBox(error, MessageType.Error);
+                }
+                catch (ExitGUIException) { throw; }
+                catch (Exception e) { error = e.Message; Debug.LogException(e); }
+                finally { EditorGUILayout.EndScrollView(); }
+                ToolWorkflow.Draw(currentTab == 0 ? nameof(PrefabCopyTool) : null);
+            }
         }
     }
-    // 3. 一键打开主窗口（菜单入口）
     [MenuItem("BjTools/多功能电饭煲", false, 10)]
     public static void OpenHub()
     {
-        ToolManagerWindow window = GetWindow<ToolManagerWindow>();
-        window.titleContent = new GUIContent("多功能电饭煲");
-        window.Show();
+        var window = GetWindow<ToolManagerWindow>(); window.Show();
     }
 }
