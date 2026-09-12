@@ -19,6 +19,7 @@ public class ToolManagerWindow : EditorWindow
         tools[0] = new PrefabCopyTool(); tools[1] = new DependencyRecordTool(); tools[2] = new IllegalReferenceTool();
         tools[3] = new MaterialTextureMigrator(); tools[4] = new BatchRenameTool(); tools[5] = new PrefabMatProjectTool(); tools[6] = new BatchChangeModelImport();
         foreach (var panel in tools.Values) ToolPreferences.Load(panel);
+        ((IllegalReferenceTool)tools[2]).Changed += Repaint;
         Selection.selectionChanged += Invalidate;
         EditorApplication.projectChanged += Invalidate;
         EditorApplication.hierarchyChanged += Invalidate;
@@ -30,6 +31,7 @@ public class ToolManagerWindow : EditorWindow
         Selection.selectionChanged -= Invalidate; EditorApplication.projectChanged -= Invalidate;
         EditorApplication.hierarchyChanged -= Invalidate; ToolWorkflow.Changed -= Repaint;
         foreach (var panel in tools.Values) ToolPreferences.Save(panel);
+        if (tools.TryGetValue(2, out var illegalTool)) ((IllegalReferenceTool)illegalTool).Changed -= Repaint;
         tools.Clear();
     }
     void Invalidate() { foreach (var panel in tools.Values) (panel as ToolPanel)?.Invalidate(); Repaint(); }
@@ -64,7 +66,7 @@ public class ToolManagerWindow : EditorWindow
                 catch (ExitGUIException) { throw; }
                 catch (Exception e) { error = e.Message; Debug.LogException(e); }
                 finally { EditorGUILayout.EndScrollView(); }
-                ToolWorkflow.Draw(currentTab == 0 ? nameof(PrefabCopyTool) : null);
+                ToolWorkflow.Draw(currentTab == 0 ? nameof(PrefabCopyTool) : null, position.height);
             }
         }
     }

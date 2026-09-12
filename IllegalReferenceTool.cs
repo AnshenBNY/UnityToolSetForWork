@@ -11,6 +11,8 @@ namespace ToolSet
     public class IllegalReferenceTool : IToolGUI
     {
         private const string ZeroGuid = "00000000000000000000000000000000";
+        private const int CandidateLimit = 30;
+        public event Action Changed;
 
         private readonly List<UnityEngine.Object> queryTargets = new();
         private readonly List<DefaultAsset> excludeFolders = new();
@@ -46,6 +48,9 @@ namespace ToolSet
             public readonly List<string> referencedByPaths = new();
             public readonly HashSet<string> ownerDirectoryRoots = new(StringComparer.OrdinalIgnoreCase);
             public List<string> candidatePaths = new();
+            public bool searchingCandidates;
+            public string candidateStatus;
+            public MessageType candidateStatusType = MessageType.Info;
             public bool foldout = true;
         }
 
@@ -65,8 +70,6 @@ namespace ToolSet
             ToolUi.DrawFoldoutCard("2) 忽略规则（排除目录/类型）", ref ruleFoldout, DrawRuleSection);
             ToolUi.DrawFoldoutCard("3) 查询结果与处理", ref resultFoldout, DrawResultSection);
 
-            EditorGUILayout.Space(8);
-            ToolUi.DrawStatus(statusMessage);
         }
 
         private void DrawTargetSection()
@@ -155,6 +158,7 @@ namespace ToolSet
                     EditorGUILayout.ObjectField("复制替换目标目录", replaceCopyTargetFolder, typeof(DefaultAsset), false) as DefaultAsset;
             }
 
+            ToolUi.DrawStatus(statusMessage);
             EditorGUILayout.Space(6);
             if (results.Count == 0)
             {
@@ -207,15 +211,14 @@ namespace ToolSet
 
             EditorGUILayout.Space(4);
             EditorGUILayout.LabelField("处理操作", sectionTitleStyle);
+            if (!string.IsNullOrEmpty(item.candidateStatus))
+                EditorGUILayout.HelpBox(item.candidateStatus, item.candidateStatusType);
+
             using (new EditorGUILayout.HorizontalScope())
             {
-                if (GUILayout.Button("查找候选替换", GUILayout.Width(120)))
-                {
-                    item.candidatePaths = SearchCandidatePaths(item, 30);
-                    statusMessage = item.candidatePaths.Count == 0
-                        ? $"未找到候选：{item.fileName}"
-                        : $"找到候选 {item.candidatePaths.Count} 个：{item.fileName}";
-                }
+                using (new EditorGUI.DisabledScope(item.searchingCandidates))
+                    if (GUILayout.Button(item.searchingCandidates ? "正在查找…" : "查找候选替换", GUILayout.Width(120)))
+                        FindCandidates(item);
 
                 if (GUILayout.Button("预览清空引用", GUILayout.Width(140)))
                 {
@@ -316,7 +319,7 @@ namespace ToolSet
             try { ToolAssetCache.Clear(); RunQueryCore(); }
             catch (OperationCanceledException) { statusMessage = "查询已取消，保留上次结果"; }
             catch (Exception e) { statusMessage = "查询失败：" + e.Message; Debug.LogException(e); }
-            finally { EditorUtility.ClearProgressBar(); }
+            finally { EditorUtility.ClearProgressBar(); Changed?.Invoke(); }
         }
         private void RunQueryCore()
         {
@@ -525,7 +528,54 @@ namespace ToolSet
             return paths;
         }
 
-        private List<string> SearchCandidatePaths(IllegalReferenceItem item, int maxCount)
+        private void FindCandidates(IllegalReferenceItem item)
+        {
+            if (item.searchingCandidates) return;
+            item.searchingCandidates = true;
+            item.candidatePaths.Clear();
+            item.candidateStatus = "正在查找候选替换资源…";
+            item.candidateStatusType = MessageType.Info;
+            EditorApplication.delayCall += () =>
+            {
+                try
+                {
+                    var roots = GetCandidateRoots(item);
+                    string scope = "搜索范围：" + string.Join("、", roots) + "\n匹配规则：文件名（含扩展名）相同，忽略大小写，并排除原资源。";
+                    item.candidatePaths = SearchCandidatePaths(item, roots, CandidateLimit);
+                    item.candidateStatus = roots.Length == 0
+                        ? "无法查找候选：没有有效的搜索目录。请重新查询或添加有效的排除目录。"
+                        : item.candidatePaths.Count == 0
+                            ? "未找到同名候选资源。\n" + scope
+                            : $"找到 {item.candidatePaths.Count} 个候选资源" +
+                              (item.candidatePaths.Count >= CandidateLimit ? $"（最多显示 {CandidateLimit} 个）" : "") + "。\n" + scope;
+                    item.candidateStatusType = item.candidatePaths.Count == 0 ? MessageType.Warning : MessageType.Info;
+                    statusMessage = item.candidatePaths.Count == 0
+                        ? $"未找到候选：{item.fileName}（详见该项提示）"
+                        : $"找到候选 {item.candidatePaths.Count} 个：{item.fileName}";
+                }
+                catch (OperationCanceledException)
+                {
+                    item.candidateStatus = "候选查找已取消，可再次点击查找。";
+                    item.candidateStatusType = MessageType.Info;
+                    statusMessage = $"候选查找已取消：{item.fileName}";
+                }
+                catch (Exception e)
+                {
+                    item.candidateStatus = "候选查找失败：" + e.Message;
+                    item.candidateStatusType = MessageType.Error;
+                    statusMessage = $"候选查找失败：{item.fileName}（详见该项提示）";
+                    Debug.LogException(e);
+                }
+                finally
+                {
+                    item.searchingCandidates = false;
+                    EditorUtility.ClearProgressBar();
+                    Changed?.Invoke();
+                }
+            };
+        }
+
+        private string[] GetCandidateRoots(IllegalReferenceItem item)
         {
             HashSet<string> roots = new(StringComparer.OrdinalIgnoreCase);
             foreach (string folder in GetExcludeFolderPaths())
@@ -541,18 +591,21 @@ namespace ToolSet
                 }
             }
 
-            if (roots.Count == 0)
-            {
-                return new List<string>();
-            }
+            return roots.OrderBy(v => v, StringComparer.OrdinalIgnoreCase).ToArray();
+        }
 
+        private List<string> SearchCandidatePaths(IllegalReferenceItem item, string[] roots, int maxCount)
+        {
             string fileName = Path.GetFileName(item.illegalPath);
             string fileNameNoExt = Path.GetFileNameWithoutExtension(item.illegalPath);
             string extension = Path.GetExtension(item.illegalPath);
             HashSet<string> candidates = new(StringComparer.OrdinalIgnoreCase);
 
-            foreach (string root in roots)
+            for (int rootIndex = 0; rootIndex < roots.Length; rootIndex++)
             {
+                string root = roots[rootIndex];
+                if (EditorUtility.DisplayCancelableProgressBar("查找候选替换", root, (float)rootIndex / roots.Length))
+                    throw new OperationCanceledException();
                 string[] guids = AssetDatabase.FindAssets(fileNameNoExt, new[] { root });
                 foreach (string guid in guids)
                 {

@@ -212,6 +212,8 @@ namespace ToolSet
         static Vector2 scroll;
         static string lastOwner;
         static bool buildFailed;
+        static bool drawerExpanded;
+        static Vector2 drawerScroll;
         static ToolWorkflow()
         {
             AssemblyReloadEvents.beforeAssemblyReload += Abort;
@@ -232,7 +234,7 @@ namespace ToolSet
                     page = 0;
                 }
                 catch (Exception e) { Plan = null; buildFailed = true; Status = "内容整理失败：" + e.Message; Debug.LogException(e); }
-                finally { EditorUtility.ClearProgressBar(); Changed?.Invoke(); }
+                finally { drawerExpanded = true; drawerScroll = Vector2.zero; EditorUtility.ClearProgressBar(); Changed?.Invoke(); }
             };
         }
         public static void Start()
@@ -352,7 +354,7 @@ namespace ToolSet
                 }
             }
         }
-        public static void Draw(string activeOwner = null)
+        public static void Draw(string activeOwner = null, float windowHeight = 800)
         {
             if (Plan?.overview != null)
             {
@@ -372,34 +374,50 @@ namespace ToolSet
             }
             using (new EditorGUILayout.VerticalScope(EditorStyles.helpBox))
             {
-                EditorGUILayout.LabelField(Plan?.title ?? "操作预览与结果", EditorStyles.boldLabel);
-                EditorGUILayout.HelpBox(Status, Plan != null && Plan.errors.Count > 0 ? MessageType.Warning : MessageType.Info);
                 using (new EditorGUILayout.HorizontalScope())
                 {
-                    using (new EditorGUI.DisabledScope(Running || Plan == null || Plan.errors.Count > 0 || Plan.steps.Count == 0 || next == Plan.steps.Count && Plan.steps.All(s => s.state == "成功")))
-                        if (GUILayout.Button("执行预览中的更改", GUILayout.Height(26))) EditorApplication.delayCall += Start;
-                    using (new EditorGUI.DisabledScope(!Running)) if (GUILayout.Button("取消", GUILayout.Width(60))) cancel = true;
-                    using (new EditorGUI.DisabledScope(Running)) if (GUILayout.Button("恢复上次文件操作", GUILayout.Width(135)))
-                        EditorApplication.delayCall += RestoreLast;
+                    drawerExpanded = EditorGUILayout.Foldout(drawerExpanded,
+                        Plan?.title ?? "操作预览与结果", true, EditorStyles.foldoutHeader);
+                    GUILayout.Label(new GUIContent(Status, Status), EditorStyles.miniLabel, GUILayout.MinWidth(0), GUILayout.MaxWidth(240));
                 }
-                if (Plan == null) return;
-                filter = EditorGUILayout.TextField("筛选结果", filter);
-                onlyProblems = EditorGUILayout.ToggleLeft("仅显示问题", onlyProblems);
-                var lines = Plan.errors.Select(e => "[问题] " + e).Concat(Plan.steps.Where(s => !onlyProblems || s.state.StartsWith("失败") || s.state == "取消").Select(s => "[" + s.state + "] " + s.description))
-                    .Where(s => s.IndexOf(filter, StringComparison.OrdinalIgnoreCase) >= 0).ToArray();
-                const int size = 30;
-                page = Mathf.Clamp(page, 0, Math.Max(0, (lines.Length - 1) / size));
-                using (new EditorGUILayout.HorizontalScope())
+                if (!drawerExpanded) return;
+                using (var drawer = new EditorGUILayout.ScrollViewScope(drawerScroll,
+                    GUILayout.Height(Plan == null ? 100 : Mathf.Clamp(windowHeight * 0.32f, 140, 280))))
                 {
-                    if (GUILayout.Button("上一页", GUILayout.Width(65))) page = Math.Max(0, page - 1);
-                    GUILayout.Label($"{page + 1}/{Math.Max(1, (lines.Length + size - 1) / size)} 页 · {lines.Length} 项");
-                    if (GUILayout.Button("下一页", GUILayout.Width(65))) page = Math.Min(Math.Max(0, (lines.Length - 1) / size), page + 1);
-                    if (GUILayout.Button("复制报告", GUILayout.Width(80))) EditorGUIUtility.systemCopyBuffer = Plan.title + "\n" + Status + "\n" + string.Join("\n", Plan.errors.Concat(Plan.steps.Select(s => s.state + " " + s.description)));
+                    drawerScroll = drawer.scrollPosition;
+                    DrawOperationDetails();
                 }
-                scroll = EditorGUILayout.BeginScrollView(scroll, GUILayout.Height(110));
-                foreach (string line in lines.Skip(page * size).Take(size)) EditorGUILayout.SelectableLabel(line, GUILayout.Height(18));
-                EditorGUILayout.EndScrollView();
             }
+        }
+
+        static void DrawOperationDetails()
+        {
+            EditorGUILayout.HelpBox(Status, Plan != null && Plan.errors.Count > 0 ? MessageType.Warning : MessageType.Info);
+            using (new EditorGUILayout.HorizontalScope())
+            {
+                using (new EditorGUI.DisabledScope(Running || Plan == null || Plan.errors.Count > 0 || Plan.steps.Count == 0 || next == Plan.steps.Count && Plan.steps.All(s => s.state == "成功")))
+                    if (GUILayout.Button("执行预览中的更改", GUILayout.Height(26))) EditorApplication.delayCall += Start;
+                using (new EditorGUI.DisabledScope(!Running)) if (GUILayout.Button("取消", GUILayout.Width(60))) cancel = true;
+                using (new EditorGUI.DisabledScope(Running)) if (GUILayout.Button("恢复上次文件操作", GUILayout.Width(135)))
+                    EditorApplication.delayCall += RestoreLast;
+            }
+            if (Plan == null) return;
+            filter = EditorGUILayout.TextField("筛选结果", filter);
+            onlyProblems = EditorGUILayout.ToggleLeft("仅显示问题", onlyProblems);
+            var lines = Plan.errors.Select(e => "[问题] " + e).Concat(Plan.steps.Where(s => !onlyProblems || s.state.StartsWith("失败") || s.state == "取消").Select(s => "[" + s.state + "] " + s.description))
+                .Where(s => s.IndexOf(filter, StringComparison.OrdinalIgnoreCase) >= 0).ToArray();
+            const int size = 30;
+            page = Mathf.Clamp(page, 0, Math.Max(0, (lines.Length - 1) / size));
+            using (new EditorGUILayout.HorizontalScope())
+            {
+                if (GUILayout.Button("上一页", GUILayout.Width(65))) page = Math.Max(0, page - 1);
+                GUILayout.Label($"{page + 1}/{Math.Max(1, (lines.Length + size - 1) / size)} 页 · {lines.Length} 项");
+                if (GUILayout.Button("下一页", GUILayout.Width(65))) page = Math.Min(Math.Max(0, (lines.Length - 1) / size), page + 1);
+                if (GUILayout.Button("复制报告", GUILayout.Width(80))) EditorGUIUtility.systemCopyBuffer = Plan.title + "\n" + Status + "\n" + string.Join("\n", Plan.errors.Concat(Plan.steps.Select(s => s.state + " " + s.description)));
+            }
+            scroll = EditorGUILayout.BeginScrollView(scroll, GUILayout.Height(110));
+            foreach (string line in lines.Skip(page * size).Take(size)) EditorGUILayout.SelectableLabel(line, GUILayout.Height(18));
+            EditorGUILayout.EndScrollView();
         }
     }
 }
