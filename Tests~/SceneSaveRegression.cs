@@ -1,6 +1,5 @@
 using System;
 using System.IO;
-using System.Reflection;
 using ToolSet;
 using UnityEditor;
 using UnityEngine;
@@ -8,12 +7,10 @@ using Object = UnityEngine.Object;
 
 public static class SceneSaveRegression
 {
-    const BindingFlags Fields = BindingFlags.Instance | BindingFlags.NonPublic;
-
     public static void Run()
     {
-        GameObject originalInstance = null;
-        GameObject copiedInstance = null;
+        GameObject first = null;
+        GameObject second = null;
         try
         {
             Folder("Assets/SceneSaveFocused/Input");
@@ -22,45 +19,32 @@ public static class SceneSaveRegression
             var source = PrefabUtility.SaveAsPrefabAsset(sourceObject, "Assets/SceneSaveFocused/Input/SaveSource.prefab");
             Object.DestroyImmediate(sourceObject);
 
-            originalInstance = (GameObject)PrefabUtility.InstantiatePrefab(source);
-            originalInstance.GetComponent<MeshRenderer>().enabled = false;
-            PrefabUtility.RecordPrefabInstancePropertyModifications(originalInstance.GetComponent<MeshRenderer>());
-            var tool = Tool(originalInstance, "Assets/SceneSaveFocused/Output");
-            var create = tool.BuildSceneSavePlan();
-            string copyPath = create.overview.ResultPaths[0];
-            Require(copyPath != AssetDatabase.GetAssetPath(source), "普通场景实例仍指向原始预制体路径");
-            RunPlan(create);
+            first = (GameObject)PrefabUtility.InstantiatePrefab(source);
+            first.GetComponent<MeshRenderer>().enabled = false;
+            PrefabUtility.RecordPrefabInstancePropertyModifications(first.GetComponent<MeshRenderer>());
+            var tool = new PrefabCopyTool();
+            tool.AddSceneInstances(new[] { first });
+            var save = tool.BuildSceneSavePlan();
+            Require(save.overview.ResultPaths[0] == AssetDatabase.GetAssetPath(source), "保存目标不是实例当前连接的预制体");
+            RunPlan(save);
+            Require(!AssetDatabase.LoadAssetAtPath<GameObject>(AssetDatabase.GetAssetPath(source)).GetComponent<MeshRenderer>().enabled, "场景加工值没有保存到当前预制体");
 
-            var copy = AssetDatabase.LoadAssetAtPath<GameObject>(copyPath);
-            Require(copy != null && !copy.GetComponent<MeshRenderer>().enabled, "场景加工值没有保存到新副本");
-            Require(PrefabUtility.GetPrefabAssetType(copy) == PrefabAssetType.Regular, "新副本不是独立常规预制体");
-            Require(AssetDatabase.LoadAssetAtPath<GameObject>(AssetDatabase.GetAssetPath(source)).GetComponent<MeshRenderer>().enabled, "原始预制体被覆盖");
-
-            copiedInstance = (GameObject)PrefabUtility.InstantiatePrefab(copy);
-            copiedInstance.GetComponent<MeshRenderer>().enabled = true;
-            PrefabUtility.RecordPrefabInstancePropertyModifications(copiedInstance.GetComponent<MeshRenderer>());
-            var reloadedTool = Tool(copiedInstance, "Assets/SceneSaveFocused/Output");
-            var update = reloadedTool.BuildSceneSavePlan();
-            Require(update.overview.ResultPaths[0] == copyPath, "丢失会话记录后没有识别已有工具副本");
-            RunPlan(update);
-            Require(AssetDatabase.LoadAssetAtPath<GameObject>(copyPath).GetComponent<MeshRenderer>().enabled, "已有工具副本没有原位更新");
+            second = (GameObject)PrefabUtility.InstantiatePrefab(source);
+            var duplicateTool = new PrefabCopyTool();
+            duplicateTool.AddSceneInstances(new[] { first, second });
+            bool blocked = false;
+            try { duplicateTool.BuildSceneSavePlan(); }
+            catch (InvalidOperationException) { blocked = true; }
+            Require(blocked, "连接到同一预制体的多个实例没有阻止冲突保存");
 
             Finish("PASS");
         }
         catch (Exception e) { Finish("FAIL\n" + e); }
         finally
         {
-            if (originalInstance != null) Object.DestroyImmediate(originalInstance);
-            if (copiedInstance != null) Object.DestroyImmediate(copiedInstance);
+            if (first != null) Object.DestroyImmediate(first);
+            if (second != null) Object.DestroyImmediate(second);
         }
-    }
-
-    static PrefabCopyTool Tool(GameObject instance, string output)
-    {
-        var tool = new PrefabCopyTool();
-        tool.AddSceneInstances(new[] { instance });
-        typeof(PrefabCopyTool).GetField("outputFolder", Fields).SetValue(tool, Folder(output));
-        return tool;
     }
 
     static DefaultAsset Folder(string path)

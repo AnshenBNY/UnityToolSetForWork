@@ -196,7 +196,7 @@ internal static class SceneCopyRegression
             finally { Destroy(instances); }
         });
 
-        test("Scene batch saves multiple generated roots and rejects duplicate destination instances", () =>
+        test("Scene batch saves current prefab regardless of tool origin and rejects duplicate targets", () =>
         {
             var tool = new PrefabCopyTool(); tool.AddSourcePrefabs(new[] { source, AssetDatabase.LoadAssetAtPath<GameObject>("Assets/BatchSources/B/Twin.prefab") }); Set(tool, "outputFolder", Folder("Assets/SceneSave"));
             var copy = tool.PrepareCompleteCopy(); RunPlan(copy); tool.PlaceCopiesInScene(copy.overview.ResultPaths); var instances = Inputs(tool).ToArray();
@@ -207,10 +207,10 @@ internal static class SceneCopyRegression
                 foreach (var instance in instances) { instance.GetComponent<Renderer>().enabled = false; PrefabUtility.RecordPrefabInstancePropertyModifications(instance.GetComponent<Renderer>()); }
                 ((HashSet<string>)typeof(PrefabCopyTool).GetField("rootCopyPaths", Fields).GetValue(tool)).Clear();
                 var save = tool.BuildSceneSavePlan(); Require(save.overview.sceneTargets.Count == 2, "save summary includes both scene targets"); RunPlan(save);
-                Require(copy.overview.ResultPaths.All(p => !AssetDatabase.LoadAssetAtPath<GameObject>(p).GetComponent<Renderer>().enabled), "generated prefab files remain recognizable and save after session tracking is lost");
+                Require(copy.overview.ResultPaths.All(p => !AssetDatabase.LoadAssetAtPath<GameObject>(p).GetComponent<Renderer>().enabled), "current prefab files save without tool-generation tracking");
                 duplicate = (GameObject)PrefabUtility.InstantiatePrefab(AssetDatabase.LoadAssetAtPath<GameObject>(copy.overview.ResultPaths[0])); tool.AddSceneInstances(new[] { duplicate });
-                bool blocked = false; try { tool.BuildSceneSavePlan(); } catch (InvalidOperationException e) { blocked = e.Message.Contains("同一个副本文件"); }
-                Require(blocked, "two instances targeting one file are rejected before writes");
+                bool blocked = false; try { tool.BuildSceneSavePlan(); } catch (InvalidOperationException e) { blocked = e.Message.Contains("同一个预制体"); }
+                Require(blocked, "two instances connected to one prefab are rejected before writes");
             }
             finally { if (duplicate != null) Object.DestroyImmediate(duplicate); Destroy(instances); }
         });
@@ -233,12 +233,9 @@ internal static class SceneCopyRegression
                     originalInstance.GetComponent<Renderer>().enabled = false;
                     var saveOriginalTool = Tool(new[] { originalInstance }, "Assets/SceneSaveOriginal");
                     var saveOriginal = saveOriginalTool.BuildSceneSavePlan();
-                    Require(saveOriginal.overview.ResultPaths.Length == 1 && saveOriginal.overview.ResultPaths[0] != AssetDatabase.GetAssetPath(source), "original instance is assigned a new destination");
+                    Require(saveOriginal.overview.ResultPaths.Length == 1 && saveOriginal.overview.ResultPaths[0] == AssetDatabase.GetAssetPath(source), "scene save does not target the currently connected prefab");
                     RunPlan(saveOriginal);
-                    var savedCopy = AssetDatabase.LoadAssetAtPath<GameObject>(saveOriginal.overview.ResultPaths[0]);
-                    Require(savedCopy != null && !savedCopy.GetComponent<Renderer>().enabled, "processed scene values are saved to the new prefab");
-                    Require(PrefabUtility.GetPrefabAssetType(savedCopy) == PrefabAssetType.Regular, "scene save creates an independent regular prefab");
-                    Require(AssetDatabase.LoadAssetAtPath<GameObject>(AssetDatabase.GetAssetPath(source)).GetComponent<Renderer>().enabled, "original source prefab remains unchanged");
+                    Require(!AssetDatabase.LoadAssetAtPath<GameObject>(AssetDatabase.GetAssetPath(source)).GetComponent<Renderer>().enabled, "processed scene values are not saved to the connected prefab");
                 }
                 finally { Object.DestroyImmediate(originalInstance); }
             }

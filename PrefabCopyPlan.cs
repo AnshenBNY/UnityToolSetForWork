@@ -187,7 +187,8 @@ namespace ToolSet
         string OutputInputSignature() => AssetDatabase.GetAssetPath(outputFolder) + "|" +
             string.Join("|", excludeFolders.Select(f => f == null ? "" : AssetDatabase.GetAssetPath(f)));
         string CompleteCopyInputSignature() => string.Join(",", sourcePrefabs.Select(p => p == null ? "<missing>" : p.GetInstanceID().ToString())) + "|" + OutputInputSignature();
-        string SceneCopyInputSignature() => string.Join(",", sceneInstances.Select(p => p == null ? "<missing>" : p.GetInstanceID().ToString())) + "|" + OutputInputSignature();
+        string SceneInstanceInputSignature() => string.Join(",", sceneInstances.Select(p => p == null ? "<missing>" : p.GetInstanceID().ToString()));
+        string SceneCopyInputSignature() => SceneInstanceInputSignature() + "|" + OutputInputSignature();
 
         internal void MigrateLegacyCopyInput()
         {

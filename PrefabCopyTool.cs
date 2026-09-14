@@ -210,15 +210,11 @@ namespace ToolSet
             }
             ToolUi.EndCard();
 
-            ToolUi.BeginCard("4) 保存加工后的副本");
-            bool needsNewDestination = hasInstances && sceneInstances.Any(instance => instance != null &&
-                !IsManagedRootCopy(PrefabUtility.GetPrefabAssetPathOfNearestInstanceRoot(instance), outputPath));
-            if (needsNewDestination && !validOutput)
-                EditorGUILayout.HelpBox("普通场景实例需要有效的输出目录，工具会在其中新建 Prefabs 副本。", MessageType.Warning);
-            using (new EditorGUI.DisabledScope(!hasInstances || (needsNewDestination && !validOutput)))
-                if (GUILayout.Button(sceneInstances.Count > 1 ? $"预览保存加工副本（{sceneInstances.Count} 个）" : "预览保存加工副本", GUILayout.Height(30)))
+            ToolUi.BeginCard("4) 保存到当前连接的预制体");
+            using (new EditorGUI.DisabledScope(!hasInstances))
+                if (GUILayout.Button(sceneInstances.Count > 1 ? $"预览保存当前预制体（{sceneInstances.Count} 个）" : "预览保存当前预制体", GUILayout.Height(30)))
                     ToolWorkflow.Preview(BuildSceneSavePlan, SceneWorkflowOwner);
-            EditorGUILayout.LabelField("普通实例会在输出目录新建独立副本；工具副本会更新原副本文件。原始预制体不会被覆盖。", EditorStyles.wordWrappedMiniLabel);
+            EditorGUILayout.LabelField("直接保存到实例当前连接的预制体，不要求该预制体由本工具生成；此操作与上方输出目录无关。", EditorStyles.wordWrappedMiniLabel);
             ToolUi.EndCard();
         }
 
