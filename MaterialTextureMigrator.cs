@@ -10,8 +10,11 @@ namespace ToolSet
     {
         DefaultAsset sourceMaterialsFolder, targetTexturesFolder;
         readonly List<DefaultAsset> excludeFolders = new List<DefaultAsset>();
+        string InputSignature() => AssetDatabase.GetAssetPath(sourceMaterialsFolder) + "|" + AssetDatabase.GetAssetPath(targetTexturesFolder) + "|" +
+            string.Join("|", excludeFolders.Select(AssetDatabase.GetAssetPath));
         public override void DrawGUI()
         {
+            string previousInput = InputSignature();
             ToolUi.DrawToolHeader("材质贴图迁移", "复制材质引用的贴图，并更新所选目录中的材质。纹理坐标和缩放保持原值。");
             sourceMaterialsFolder = (DefaultAsset)EditorGUILayout.ObjectField("待修改的材质目录", sourceMaterialsFolder, typeof(DefaultAsset), false);
             targetTexturesFolder = (DefaultAsset)EditorGUILayout.ObjectField("贴图输出目录", targetTexturesFolder, typeof(DefaultAsset), false);
@@ -25,6 +28,7 @@ namespace ToolSet
             if (GUILayout.Button("添加排除目录")) excludeFolders.Add(null);
             ToolUi.EndCard();
             if (GUILayout.Button("预览贴图迁移", GUILayout.Height(30))) ToolWorkflow.Preview(BuildPlan);
+            if (previousInput != InputSignature()) ToolWorkflow.DiscardPreparedPlan(nameof(MaterialTextureMigrator));
         }
         internal ToolPlan BuildPlan()
         {
@@ -32,14 +36,16 @@ namespace ToolSet
             if (!AssetDatabase.IsValidFolder(source) || !AssetDatabase.IsValidFolder(target) || !ToolPaths.Contains("Assets", target))
                 throw new InvalidOperationException("请选择有效的材质目录和 Assets 内的输出目录。");
             var plan = new ToolPlan { title = "材质贴图迁移" };
+            string input = InputSignature();
             var excluded = excludeFolders.Where(f => f != null).Select(AssetDatabase.GetAssetPath).ToArray();
             var paths = new CopyPathAllocator();
             var copies = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             var edits = new List<(string path, Dictionary<string, Texture> slots)>();
             var materials = AssetDatabase.FindAssets("t:Material", new[] { source }).Select(AssetDatabase.GUIDToAssetPath).Distinct().OrderBy(p => p).ToArray();
+            int processed = 0;
             foreach (string path in materials)
             {
-                if (EditorUtility.DisplayCancelableProgressBar("预览贴图迁移", path, (float)edits.Count / Math.Max(1, materials.Length))) throw new OperationCanceledException();
+                if (EditorUtility.DisplayCancelableProgressBar("预览贴图迁移", path, (float)processed++ / Math.Max(1, materials.Length))) throw new OperationCanceledException();
                 if (!path.EndsWith(".mat", StringComparison.OrdinalIgnoreCase)) continue;
                 var material = AssetDatabase.LoadAssetAtPath<Material>(path);
                 if (material == null) { plan.errors.Add("无法加载材质：" + path); continue; }
@@ -87,6 +93,8 @@ namespace ToolSet
                     so.ApplyModifiedPropertiesWithoutUndo();
                     AssetDatabase.SaveAssetIfDirty(material);
                 });
+            plan.validate = () => InputSignature() != input ? "迁移目录或排除设置已变化，请重新预览。" : null;
+            plan.emptyMessage = materials.Length == 0 ? "材质目录中没有可检查的材质。" : "没有发现需要迁移的贴图引用。";
             return plan;
         }
     }

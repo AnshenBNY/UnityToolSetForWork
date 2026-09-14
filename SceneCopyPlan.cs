@@ -34,8 +34,20 @@ namespace ToolSet
             .Select(t => t.GetInstanceID() + ":" + (t.parent == null ? 0 : t.parent.GetInstanceID()) + ":" + t.GetSiblingIndex() + ":" +
                 string.Join(",", t.GetComponents<Component>().Select(c => c == null ? 0 : c.GetInstanceID()))));
 
+        static bool SameModifications(PropertyModification[] before, PropertyModification[] after)
+        {
+            before = before ?? Array.Empty<PropertyModification>();
+            after = after ?? Array.Empty<PropertyModification>();
+            if (before.Length != after.Length) return false;
+            for (int i = 0; i < before.Length; i++)
+                if (before[i].target != after[i].target || before[i].propertyPath != after[i].propertyPath ||
+                    before[i].value != after[i].value || before[i].objectReference != after[i].objectReference) return false;
+            return true;
+        }
+
         public bool Changed() => roots.Any(r => r == null) || HierarchySignature() != hierarchy ||
-            values.Any(p => p.Key == null || EditorJsonUtility.ToJson(p.Key) != p.Value);
+            values.Any(p => p.Key == null || EditorJsonUtility.ToJson(p.Key) != p.Value) ||
+            modifications.Any(p => p.Key == null || !SameModifications(p.Value, PrefabUtility.GetPropertyModifications(p.Key)));
 
         public void Restore()
         {

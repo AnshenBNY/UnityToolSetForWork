@@ -112,6 +112,8 @@ namespace ToolSet
                     }
                 }
 
+                foreach (string error in plan.blockingErrors.Take(5)) EditorGUILayout.HelpBox("阻断执行：" + error, MessageType.Error);
+                if (plan.blockingErrors.Count > 5) EditorGUILayout.LabelField($"另有 {plan.blockingErrors.Count - 5} 项阻断问题，详见操作记录。", EditorStyles.wordWrappedMiniLabel);
                 // Skipped problems are visible without requiring the artist to open the log.
                 foreach (string error in plan.errors.Take(5)) EditorGUILayout.HelpBox(error, MessageType.Warning);
                 if (plan.errors.Count > 5) EditorGUILayout.LabelField($"另有 {plan.errors.Count - 5} 项问题，详见操作记录。", EditorStyles.wordWrappedMiniLabel);
@@ -120,7 +122,7 @@ namespace ToolSet
                 showTechnical = EditorGUILayout.Foldout(showTechnical, "操作记录", true);
                 if (showTechnical)
                 {
-                    string[] lines = plan.errors.Select(e => "[问题] " + e).Concat(plan.steps.Select(s => "[" + s.state + "] " + s.description)).ToArray();
+                    string[] lines = plan.blockingErrors.Select(e => "[阻断] " + e).Concat(plan.errors.Select(e => "[问题] " + e)).Concat(plan.steps.Select(s => "[" + s.state + "] " + s.description)).ToArray();
                     ToolUi.DrawPager(ref logPage, lines.Length, 20);
                     logScroll = EditorGUILayout.BeginScrollView(logScroll, GUILayout.Height(120));
                     foreach (string line in lines.Skip(logPage * 20).Take(20)) EditorGUILayout.SelectableLabel(line, GUILayout.Height(18));

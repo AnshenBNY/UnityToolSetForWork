@@ -11,15 +11,19 @@ namespace ToolSet
     {
         GameObject source, target;
         bool fxToggle = true, matToggle;
+        string InputSignature() => (source == null ? "" : source.GetInstanceID().ToString()) + "|" +
+            (target == null ? "" : target.GetInstanceID().ToString()) + "|" + fxToggle + "|" + matToggle;
         public override void DrawGUI()
         {
+            string previousInput = InputSignature();
             ToolUi.DrawToolHeader("预制体与材质映射", "按相对节点路径映射，源对象保持原样。目标必须是场景对象，修改支持 Undo。");
             source = (GameObject)EditorGUILayout.ObjectField("源根节点", source, typeof(GameObject), true);
             target = (GameObject)EditorGUILayout.ObjectField("目标根节点", target, typeof(GameObject), true);
             fxToggle = EditorGUILayout.ToggleLeft("复制嵌套特效预制体", fxToggle);
             matToggle = EditorGUILayout.ToggleLeft("映射所有 Renderer 的材质（包含根节点）", matToggle);
-            EditorGUILayout.HelpBox("目标已有同名特效节点时跳过；重名路径、缺失节点和无法保留的结构覆盖会在预览中列出。", MessageType.Info);
+            EditorGUILayout.HelpBox("目标已有同一预制体的同名特效节点时跳过；同名但来源不同、重名路径、缺失节点和无法保留的结构覆盖会在预览中列出。", MessageType.Info);
             if (GUILayout.Button("预览映射", GUILayout.Height(30))) ToolWorkflow.Preview(BuildPlan);
+            if (previousInput != InputSignature()) ToolWorkflow.DiscardPreparedPlan(nameof(PrefabMatProjectTool));
         }
         static string Relative(Transform root, Transform node)
         {
@@ -50,7 +54,10 @@ namespace ToolSet
             var created = new List<GameObject>();
             var materialsBefore = new Dictionary<Renderer, Material[]>();
             var sourceRoot = source; var targetRoot = target;
-            plan.validate = () => sourceRoot == null || targetRoot == null ? "源或目标已丢失。" : null;
+            string input = InputSignature();
+            var snapshot = new SceneCopySnapshot(new[] { sourceRoot, targetRoot });
+            plan.validate = () => sourceRoot == null || targetRoot == null ? "源或目标已丢失。" :
+                InputSignature() != input || snapshot.Changed() ? "源、目标或映射设置已变化，请重新预览。" : null;
             plan.rollback = () =>
             {
                 foreach (var go in created.Where(go => go != null)) UnityEngine.Object.DestroyImmediate(go);
@@ -68,11 +75,18 @@ namespace ToolSet
                         string parentPath = Relative(source.transform, node.parent);
                         var parent = FindUnique(target.transform, parentPath);
                         var existing = parent.Cast<Transform>().Where(t => t.name == node.name).ToArray();
-                        if (existing.Length == 1) continue;
-                        if (existing.Length > 1) throw new InvalidOperationException("目标同名节点不唯一：" + parentPath + "/" + node.name);
                         string assetPath = PrefabUtility.GetPrefabAssetPathOfNearestInstanceRoot(node.gameObject);
                         var asset = AssetDatabase.LoadAssetAtPath<GameObject>(assetPath);
                         if (asset == null) throw new InvalidOperationException("嵌套预制体来源不可用：" + node.name);
+                        if (existing.Length == 1)
+                        {
+                            string existingAssetPath = PrefabUtility.IsAnyPrefabInstanceRoot(existing[0].gameObject)
+                                ? PrefabUtility.GetPrefabAssetPathOfNearestInstanceRoot(existing[0].gameObject)
+                                : string.Empty;
+                            if (string.Equals(existingAssetPath, assetPath, StringComparison.OrdinalIgnoreCase)) continue;
+                            throw new InvalidOperationException("目标存在同名但来源不同的节点：" + parentPath + "/" + node.name);
+                        }
+                        if (existing.Length > 1) throw new InvalidOperationException("目标同名节点不唯一：" + parentPath + "/" + node.name);
                         if (PrefabUtility.GetAddedGameObjects(node.gameObject).Count > 0 || PrefabUtility.GetAddedComponents(node.gameObject).Count > 0 || PrefabUtility.GetRemovedComponents(node.gameObject).Count > 0 || PrefabUtility.GetRemovedGameObjects(node.gameObject).Count > 0)
                             throw new InvalidOperationException(node.name + " 包含添加/删除节点或组件的覆盖，请先保存为独立预制体再映射。");
                         var modifications = PrefabUtility.GetPropertyModifications(node.gameObject);
@@ -120,6 +134,7 @@ namespace ToolSet
                     }
                     catch (Exception e) { plan.errors.Add(e.Message); }
                 }
+            plan.emptyMessage = "源与目标当前没有需要映射的差异。";
             return plan;
         }
         static void Mark(Renderer renderer)

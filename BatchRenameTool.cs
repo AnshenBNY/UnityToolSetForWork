@@ -18,17 +18,28 @@ namespace ToolSet
         private InsertPosition insertPosition = InsertPosition.开头;
         private RenameTarget renameTarget = RenameTarget.资源文件;
         private bool includeChildren = true;
-        private string statusMessage = "等待操作";
-
         private List<string> cachedAssets;
         private List<GameObject> cachedNodes;
         private bool cachedIncludeChildren;
         private int startNumber = 1, numberDigits = 1;
-        public override void Invalidate() { cachedAssets = null; cachedNodes = null; }
+        public override void Invalidate()
+        {
+            cachedAssets = null;
+            cachedNodes = null;
+            ToolWorkflow.DiscardPreparedPlan(nameof(BatchRenameTool));
+        }
         private Options options = Options.基础名称加序号;
+
+        private string InputSignature() => string.Join("|", new[]
+        {
+            renameTarget.ToString(), includeChildren.ToString(), options.ToString(), newBaseName, replacePart, newPart,
+            insertPart, insertIndex.ToString(), insertPosition.ToString(), startNumber.ToString(), numberDigits.ToString(),
+            string.Join(",", Selection.instanceIDs.OrderBy(id => id))
+        });
 
         public override void DrawGUI()
         {
+            string previousInput = InputSignature();
             ToolUi.DrawToolHeader("批量重命名工具", "资源文件按路径排序；仅处理文件。场景节点支持撤销，预览列出原名与新名。");
 
             ToolUi.BeginCard("1) 目标与规则");
@@ -76,7 +87,7 @@ namespace ToolSet
             ToolUi.BeginCard("3) 当前选择");
             DrawCurrentSelection();
             ToolUi.EndCard();
-            ToolUi.DrawStatus(statusMessage);
+            if (previousInput != InputSignature()) ToolWorkflow.DiscardPreparedPlan(nameof(BatchRenameTool));
         }
 
 
@@ -124,6 +135,7 @@ namespace ToolSet
         {
             Invalidate(); ValidateInput();
             var plan = new ToolPlan { title = "批量重命名（资源保持 GUID，场景节点支持 Undo）" };
+            string input = InputSignature();
             if (renameTarget == RenameTarget.资源文件)
             {
                 var selected = GetSelectedAssetPaths();
@@ -221,8 +233,14 @@ namespace ToolSet
                             EditorSceneManager.MarkSceneDirty(c.go.scene);
                         }
                 };
-                plan.validate = () => validChanges.Any(c => c.go == null || c.go.name != c.before) ? "节点已改变，请重新预览。" : null;
+                plan.validate = () => InputSignature() != input ? "选择或重命名规则已变化，请重新预览。" :
+                    validChanges.Any(c => c.go == null || c.go.name != c.before) ? "节点已改变，请重新预览。" : null;
             }
+            if (renameTarget == RenameTarget.资源文件)
+                plan.validate = () => InputSignature() != input ? "选择或重命名规则已变化，请重新预览。" : null;
+            plan.emptyMessage = renameTarget == RenameTarget.资源文件
+                ? "当前选择中没有需要重命名的资源文件。"
+                : "当前选择中没有需要重命名的场景节点。";
             plan.completed = Invalidate;
             return plan;
         }

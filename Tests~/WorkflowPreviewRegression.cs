@@ -11,6 +11,7 @@ public static class WorkflowPreviewRegression
     static int executions;
     static ToolPlan first;
     static ToolPlan second;
+    static ToolPlan blocked;
 
     public static void Run()
     {
@@ -67,6 +68,27 @@ public static class WorkflowPreviewRegression
         {
             Require(executions == 1, "存在可跳过问题时，有效操作没有执行");
             Require(second.phase == ToolPlanPhase.Succeeded, "含问题的计划未成功完成");
+            ToolWorkflow.SetActiveOwner("TabC");
+            ToolWorkflow.Preview(() =>
+            {
+                blocked = new ToolPlan { title = "Blocked" };
+                blocked.blockingErrors.Add("必须先处理的问题");
+                blocked.Add("不应执行", _ => executions++);
+                return blocked;
+            });
+            EditorApplication.delayCall += VerifyBlockedPlan;
+        }
+        catch (Exception e) { Finish(e); }
+    }
+
+    static void VerifyBlockedPlan()
+    {
+        try
+        {
+            ToolWorkflow.Start();
+            Require(!ToolWorkflow.Running, "含阻断问题的计划仍然开始执行");
+            Require(executions == 1, "阻断计划执行了写入步骤");
+            Require(blocked.phase == ToolPlanPhase.Ready, "阻断计划状态被错误改变");
             Finish(null);
         }
         catch (Exception e) { Finish(e); }

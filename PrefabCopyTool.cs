@@ -149,7 +149,7 @@ namespace ToolSet
             if (GUILayout.Button("添加排除目录")) excludeFolders.Add(null);
             ToolUi.EndCard();
             using (new EditorGUI.DisabledScope(sourcePrefabs.Count == 0))
-                if (GUILayout.Button(sourcePrefabs.Count > 1 ? $"复制 {sourcePrefabs.Count} 个预制体…" : "复制预制体…", GUILayout.Height(32)))
+                if (GUILayout.Button(sourcePrefabs.Count > 1 ? $"预览复制 {sourcePrefabs.Count} 个预制体…" : "预览复制内容…", GUILayout.Height(32)))
                     ToolWorkflow.Preview(PrepareCompleteCopy, nameof(PrefabCopyTool));
             EditorGUILayout.LabelField("先整理复制内容，再点击下方「开始复制」。", EditorStyles.wordWrappedMiniLabel);
             showAdvanced = EditorGUILayout.Foldout(showAdvanced, "高级：批量处理场景实例", true);

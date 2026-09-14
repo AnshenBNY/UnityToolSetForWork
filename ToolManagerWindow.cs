@@ -20,6 +20,7 @@ public class ToolManagerWindow : EditorWindow
         tools[3] = new MaterialTextureMigrator(); tools[4] = new BatchRenameTool(); tools[5] = new PrefabMatProjectTool(); tools[6] = new BatchChangeModelImport();
         foreach (var panel in tools.Values) ToolPreferences.Load(panel);
         ((IllegalReferenceTool)tools[2]).Changed += Repaint;
+        ((DependencyRecordTool)tools[1]).Changed += Repaint;
         Selection.selectionChanged += Invalidate;
         EditorApplication.projectChanged += Invalidate;
         EditorApplication.hierarchyChanged += Invalidate;
@@ -32,6 +33,7 @@ public class ToolManagerWindow : EditorWindow
         EditorApplication.hierarchyChanged -= Invalidate; ToolWorkflow.Changed -= Repaint;
         foreach (var panel in tools.Values) ToolPreferences.Save(panel);
         if (tools.TryGetValue(2, out var illegalTool)) ((IllegalReferenceTool)illegalTool).Changed -= Repaint;
+        if (tools.TryGetValue(1, out var dependencyTool)) ((DependencyRecordTool)dependencyTool).Changed -= Repaint;
         tools.Clear();
     }
     void Invalidate() { foreach (var panel in tools.Values) (panel as ToolPanel)?.Invalidate(); Repaint(); }
@@ -52,7 +54,9 @@ public class ToolManagerWindow : EditorWindow
             {
                 Navigation("复制与迁移", 0, 3, 5); Navigation("检查与修复", 1, 2); Navigation("批量编辑", 4, 6);
                 GUILayout.FlexibleSpace();
-                GUILayout.Label("文件恢复：下方按钮\n场景编辑：Ctrl+Z", EditorStyles.wordWrappedMiniLabel);
+                GUILayout.Label("文件操作恢复", EditorStyles.miniBoldLabel);
+                ToolWorkflow.DrawRecoveryButton();
+                GUILayout.Label("场景编辑可使用 Ctrl+Z", EditorStyles.wordWrappedMiniLabel);
             }
             using (new EditorGUILayout.VerticalScope())
             {
@@ -71,7 +75,10 @@ public class ToolManagerWindow : EditorWindow
                 catch (Exception e) { error = e.Message; Debug.LogException(e); }
                 finally { EditorGUILayout.EndScrollView(); }
                 if (tools.TryGetValue(currentTab, out var activePanel))
+                {
+                    if (ToolWorkflow.Running && !ToolWorkflow.IsRunningOwner(activePanel.GetType().Name)) ToolWorkflow.DrawRunningStrip();
                     ToolWorkflow.Draw(activePanel.GetType().Name, position.height);
+                }
             }
         }
     }

@@ -55,6 +55,7 @@ namespace ToolSet
         public DependencyState state;
         public List<string> referencedByRoots;
         public List<string> candidatePaths = new();
+        public bool candidateSearchCompleted;
     }
 
     internal sealed class DependencyCheckReport
@@ -86,7 +87,7 @@ namespace ToolSet
         public List<MissingReportExportItem> items = new();
     }
 
-    public class DependencyRecordTool : IToolGUI
+    public class DependencyRecordTool : ToolPanel
     {
         private const string PrefKeyJsonOutputDir = "ToolSet.DependencyRecordTool.JsonOutputDir";
         private const string PrefKeyJsonFilePrefix = "ToolSet.DependencyRecordTool.JsonFilePrefix";
@@ -125,8 +126,9 @@ namespace ToolSet
         };
 
         private DependencyCheckReport lastReport;
+        public event Action Changed;
 
-        public void DrawGUI()
+        public override void DrawGUI()
         {
             EnsurePreferencesLoaded();
 
@@ -265,7 +267,18 @@ namespace ToolSet
         private void DrawParseSection()
         {
             EditorGUILayout.LabelField("3) 解析并检查依赖状态", EditorStyles.boldLabel);
-            recordAsset = EditorGUILayout.ObjectField("记录文件(TextAsset)", recordAsset, typeof(TextAsset), false) as TextAsset;
+            TextAsset selectedAsset = EditorGUILayout.ObjectField("记录文件(TextAsset)", recordAsset, typeof(TextAsset), false) as TextAsset;
+            if (selectedAsset != recordAsset)
+            {
+                recordAsset = selectedAsset;
+                if (recordAsset != null)
+                {
+                    recordExternalPath = string.Empty;
+                    statusMessage = $"已选择记录资源：{recordAsset.name}";
+                }
+                else statusMessage = "未选择记录文件";
+                lastReport = null;
+            }
 
             using (new EditorGUILayout.HorizontalScope())
             {
@@ -277,9 +290,17 @@ namespace ToolSet
                     {
                         recordExternalPath = selectedPath;
                         recordAsset = null;
+                        lastReport = null;
                         statusMessage = $"已选择记录文件：{Path.GetFileName(selectedPath)}";
                     }
                 }
+                using (new EditorGUI.DisabledScope(string.IsNullOrEmpty(recordExternalPath)))
+                    if (GUILayout.Button("清除", GUILayout.Width(52)))
+                    {
+                        recordExternalPath = string.Empty;
+                        lastReport = null;
+                        statusMessage = "已清除外部记录文件";
+                    }
             }
 
             if (GUILayout.Button("解析并检查依赖"))
@@ -299,14 +320,25 @@ namespace ToolSet
             candidateMaxCount = EditorGUILayout.IntSlider("候选显示上限", candidateMaxCount, 1, 20);
             using (new EditorGUILayout.HorizontalScope())
             {
+                using (new EditorGUI.DisabledScope(lastReport.missingCount == 0))
                 if (GUILayout.Button("为丢失项搜索候选资源"))
                 {
+                    DependencyCheckReport report = lastReport;
+                    int maxCount = candidateMaxCount;
+                    statusMessage = "正在为丢失项搜索候选资源…";
+                    Changed?.Invoke();
                     EditorApplication.delayCall += () =>
                     {
-                        try { SearchCandidatesForMissing(lastReport, candidateMaxCount); statusMessage = "候选搜索完成"; }
+                        try
+                        {
+                            SearchCandidatesForMissing(report, maxCount);
+                            int searched = report.items.Count(i => i.state == DependencyState.Missing && i.candidateSearchCompleted);
+                            int found = report.items.Count(i => i.state == DependencyState.Missing && i.candidatePaths.Count > 0);
+                            statusMessage = $"候选搜索完成：{found} 项找到候选，{Math.Max(0, searched - found)} 项未找到";
+                        }
                         catch (OperationCanceledException) { statusMessage = "候选搜索已取消"; }
                         catch (Exception e) { statusMessage = e.Message; }
-                        finally { EditorUtility.ClearProgressBar(); }
+                        finally { EditorUtility.ClearProgressBar(); Changed?.Invoke(); }
                     };
                 }
 
@@ -320,6 +352,7 @@ namespace ToolSet
                     ExportMissingReportJson(lastReport);
                 }
             }
+            ToolUi.DrawStatus(statusMessage);
             repairOnlyJsonScope = EditorGUILayout.ToggleLeft("修复仅限 JSON 记录范围（推荐）", repairOnlyJsonScope);
             repairExpandRootDependencies = EditorGUILayout.ToggleLeft("修复时扩展扫描根对象依赖链", repairExpandRootDependencies);
             DrawLargeHint("结果列表按卡片分组显示：每项包含状态、资源类型、基础信息、引用来源与候选修复区。", MessageType.None);
@@ -432,7 +465,7 @@ namespace ToolSet
             }
             else if (item.state == DependencyState.Missing)
             {
-                EditorGUILayout.LabelField("候选资源: 尚未搜索", EditorStyles.miniLabel);
+                EditorGUILayout.LabelField(item.candidateSearchCompleted ? "候选资源：未找到匹配项" : "候选资源：尚未搜索", EditorStyles.miniLabel);
             }
 
             EditorGUILayout.EndVertical();
@@ -1136,6 +1169,7 @@ namespace ToolSet
             {
                 if (EditorUtility.DisplayCancelableProgressBar("搜索候选资源", item.fileName, (float)index++ / Math.Max(1, report.items.Count))) throw new OperationCanceledException();
                 item.candidatePaths.Clear();
+                item.candidateSearchCompleted = false;
                 if (item.state != DependencyState.Missing || string.IsNullOrWhiteSpace(item.fileName))
                 {
                     continue;
@@ -1144,6 +1178,7 @@ namespace ToolSet
                 string nameWithoutExt = Path.GetFileNameWithoutExtension(item.fileName);
                 if (string.IsNullOrWhiteSpace(nameWithoutExt))
                 {
+                    item.candidateSearchCompleted = true;
                     continue;
                 }
 
@@ -1170,6 +1205,7 @@ namespace ToolSet
                         break;
                     }
                 }
+                item.candidateSearchCompleted = true;
             }
         }
 

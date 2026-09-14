@@ -79,9 +79,9 @@ namespace ToolSet
                     plan.Add("保留包内资源 " + path, _ => { }, "正在整理共享资源");
                     continue;
                 }
-                try { ToolPaths.RequireWritableAsset(path); } catch (Exception e) { plan.errors.Add(e.Message); }
+                try { ToolPaths.RequireSavedAsset(path); } catch (Exception e) { plan.blockingErrors.Add(e.Message); }
                 string targetFolder = folder + "/" + category;
-                if (File.Exists(targetFolder)) { plan.errors.Add("分类目录被同名文件占用：" + targetFolder); continue; }
+                if (File.Exists(targetFolder)) { plan.blockingErrors.Add("分类目录被同名文件占用：" + targetFolder); continue; }
                 folders.Add(targetFolder);
                 string destination = allocator.Reserve(path, targetFolder);
                 overview.resources.Add(new CopyResource { source = path, destination = destination, category = CopyOverview.CategoryName(category) });

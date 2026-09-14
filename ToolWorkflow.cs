@@ -31,10 +31,9 @@ namespace ToolSet
             using (var stream = File.OpenRead(path))
             using (var hash = SHA256.Create()) return Convert.ToBase64String(hash.ComputeHash(stream));
         }
-        public static void RequireWritableAsset(string path)
+        public static void RequireSavedAsset(string path)
         {
             if (!Contains("Assets", path) || !File.Exists(path)) throw new InvalidOperationException("资源路径无效：" + path);
-            if ((File.GetAttributes(path) & FileAttributes.ReadOnly) != 0) throw new IOException("资源只读：" + path);
             if (EditorUtility.IsDirty(AssetDatabase.LoadMainAssetAtPath(path)))
                 throw new InvalidOperationException("资源有未保存修改，请先保存再预览：" + path);
             var stage = UnityEditor.SceneManagement.PrefabStageUtility.GetCurrentPrefabStage();
@@ -46,6 +45,11 @@ namespace ToolSet
                     var scene = UnityEngine.SceneManagement.SceneManager.GetSceneAt(i);
                     if (scene.path == path && scene.isDirty) throw new InvalidOperationException("场景有未保存修改：" + path);
                 }
+        }
+        public static void RequireWritableAsset(string path)
+        {
+            RequireSavedAsset(path);
+            if ((File.GetAttributes(path) & FileAttributes.ReadOnly) != 0) throw new IOException("资源只读：" + path);
         }
     }
 
@@ -111,7 +115,11 @@ namespace ToolSet
         {
             foreach (var entry in manifest.entries) entry.after = entry.isDirectory ? (Directory.Exists(entry.path) ? "<directory>" : "<missing>") : ToolPaths.Fingerprint(entry.path);
             Save();
-            if (manifest.entries.Count > 0) EditorPrefs.SetString(ToolPaths.PreferenceKey("LastBackup"), Path.GetFullPath(ManifestPath));
+            if (manifest.entries.Count > 0)
+            {
+                EditorPrefs.SetString(ToolPaths.PreferenceKey("LastBackup"), Path.GetFullPath(ManifestPath));
+                CleanupOldBackups();
+            }
         }
         void Save() => File.WriteAllText(ManifestPath, JsonUtility.ToJson(manifest, true));
         public void Rollback() => RestoreManifest(manifest, false);
@@ -121,6 +129,33 @@ namespace ToolSet
             if (!File.Exists(path)) throw new IOException("没有可恢复的操作备份。");
             RestoreManifest(JsonUtility.FromJson<BackupManifest>(File.ReadAllText(path)), true);
             EditorPrefs.DeleteKey(ToolPaths.PreferenceKey("LastBackup"));
+        }
+        public static string LastBackupSummary()
+        {
+            string path = EditorPrefs.GetString(ToolPaths.PreferenceKey("LastBackup"));
+            if (!File.Exists(path)) return "没有可恢复的文件操作";
+            try
+            {
+                var data = JsonUtility.FromJson<BackupManifest>(File.ReadAllText(path));
+                return $"最近操作：{data?.title ?? "未知操作"} · {File.GetLastWriteTime(path):yyyy-MM-dd HH:mm}";
+            }
+            catch { return "最近操作备份信息无法读取"; }
+        }
+        public static bool HasLastBackup => File.Exists(EditorPrefs.GetString(ToolPaths.PreferenceKey("LastBackup")));
+        void CleanupOldBackups()
+        {
+            string root = Path.GetFullPath("Library/ToolSetBackups");
+            if (!Directory.Exists(root)) return;
+            string current = Path.GetFullPath(directory);
+            var oldDirectories = Directory.GetDirectories(root).Select(Path.GetFullPath)
+                .Where(path => !path.Equals(current, StringComparison.OrdinalIgnoreCase))
+                .OrderByDescending(Directory.GetLastWriteTimeUtc).Skip(9).ToArray();
+            foreach (string path in oldDirectories)
+                try
+                {
+                    if (path.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)) Directory.Delete(path, true);
+                }
+                catch (Exception e) { Debug.LogWarning("清理旧工具备份失败：" + e.Message); }
         }
         static void RestoreManifest(BackupManifest data, bool checkChanges)
         {
@@ -182,10 +217,12 @@ namespace ToolSet
     {
         public string title;
         public string owner;
+        public string emptyMessage;
         public CopyOverview overview;
         public ToolPlanPhase phase = ToolPlanPhase.Ready;
         public readonly List<ToolStep> steps = new List<ToolStep>();
         public readonly List<string> errors = new List<string>();
+        public readonly List<string> blockingErrors = new List<string>();
         public readonly Dictionary<string, string> fingerprints = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         public Action completed, rollback;
         public Func<string> validate;
@@ -261,8 +298,14 @@ namespace ToolSet
                     Plan.owner = OwnerKey(Plan.owner ?? requestedOwner);
                     state = Page(Plan.owner);
                     state.plan = Plan;
-                    state.status = Plan.overview?.ReadyMessage ?? $"预览：可执行 {Plan.steps.Count} 项，问题 {Plan.errors.Count} 项";
-                    if (Plan.overview != null && Plan.errors.Count > 0) state.status += $" · 问题 {Plan.errors.Count} 项将跳过";
+                    if (Plan.steps.Count == 0 && Plan.errors.Count == 0 && Plan.blockingErrors.Count == 0)
+                        state.status = Plan.emptyMessage ?? "没有需要执行的更改。";
+                    else
+                    {
+                        state.status = Plan.overview?.ReadyMessage ?? $"预览：可执行 {Plan.steps.Count} 项，问题 {Plan.errors.Count} 项";
+                        if (Plan.blockingErrors.Count > 0) state.status += $" · 阻断 {Plan.blockingErrors.Count} 项";
+                        if (Plan.overview != null && Plan.errors.Count > 0) state.status += $" · 问题 {Plan.errors.Count} 项将跳过";
+                    }
                     state.page = 0;
                     Status = state.status;
                 }
@@ -284,7 +327,7 @@ namespace ToolSet
         }
         public static void Start()
         {
-            if (Running || Plan == null || Plan.phase != ToolPlanPhase.Ready || Plan.steps.Count == 0) return;
+            if (Running || Plan == null || Plan.phase != ToolPlanPhase.Ready || Plan.steps.Count == 0 || Plan.blockingErrors.Count > 0) return;
             executionOwner = OwnerKey(Plan.owner ?? executionOwner);
             try
             {
@@ -352,7 +395,7 @@ namespace ToolSet
             if (Running || state.plan == null || state.plan.phase == ToolPlanPhase.Succeeded) return;
             if (ReferenceEquals(Plan, state.plan)) Plan = null;
             state.plan = null; state.buildFailed = false;
-            state.status = "设置已修改，请重新点击复制按钮整理清单。";
+            state.status = "设置已修改，请重新生成预览。";
             Status = state.status;
             Changed?.Invoke();
         }
@@ -361,12 +404,11 @@ namespace ToolSet
             var plan = Page(owner).plan;
             plan?.overview?.Draw(plan);
         }
-        static void RestoreLast(string owner)
+        static void RestoreLast()
         {
             if (Running) return;
-            var state = Page(owner);
             if (!EditorUtility.DisplayDialog("确认恢复上次文件操作",
-                "将恢复整个工具最近一次有文件变化的已完成操作，不一定是当前页面的操作。\n\n" +
+                "将恢复整个工具最近一次有文件变化的已完成操作。\n" + ToolFileTransaction.LastBackupSummary() + "\n\n" +
                 "• 删除该次操作新建的资源及 .meta，并清理新建的空目录。\n" +
                 "• 还原该次操作对原有文件的修改或重命名。\n\n" +
                 "场景中的实例不会自动删除，需要单独撤销。\n\n确定继续恢复吗？",
@@ -374,12 +416,45 @@ namespace ToolSet
             try
             {
                 ToolFileTransaction.RestoreLast();
-                state.status = "已恢复上次文件操作，请重新整理清单或查询。";
-                if (ReferenceEquals(Plan, state.plan)) Plan = null;
-                state.plan = null; state.buildFailed = false; Status = state.status;
+                foreach (var state in pages.Values)
+                {
+                    state.status = "已恢复上次文件操作，请重新整理清单或查询。";
+                    state.plan = null;
+                    state.buildFailed = false;
+                }
+                Plan = null;
+                Status = "已恢复上次文件操作，请重新整理清单或查询。";
             }
-            catch (Exception e) { state.status = e.Message; state.buildFailed = true; Status = state.status; }
+            catch (Exception e)
+            {
+                var state = Page(activeOwner);
+                state.status = e.Message;
+                state.buildFailed = true;
+                Status = state.status;
+            }
             Changed?.Invoke();
+        }
+
+        public static void DrawRecoveryButton()
+        {
+            bool available = ToolFileTransaction.HasLastBackup;
+            using (new EditorGUI.DisabledScope(Running || !available))
+                if (GUILayout.Button(new GUIContent("恢复上次文件操作", available ? "查看并恢复最近一次文件操作" : "没有可恢复的文件操作"), GUILayout.Height(25)))
+                    EditorApplication.delayCall += RestoreLast;
+        }
+
+        public static bool IsRunningOwner(string owner) => Running && OwnerKey(owner) == executionOwner;
+
+        public static void DrawRunningStrip()
+        {
+            if (!Running || Plan == null) return;
+            using (new EditorGUILayout.HorizontalScope(EditorStyles.helpBox))
+            {
+                GUILayout.Label("正在执行：" + Plan.title, EditorStyles.miniBoldLabel, GUILayout.Width(190));
+                var rect = GUILayoutUtility.GetRect(100, 18, GUILayout.ExpandWidth(true));
+                EditorGUI.ProgressBar(rect, (float)next / Math.Max(1, Plan.steps.Count), $"{next}/{Plan.steps.Count}");
+                if (GUILayout.Button("取消", GUILayout.Width(60))) cancel = true;
+            }
         }
         static void DrawCopyActions(string owner, PageState state)
         {
@@ -392,15 +467,15 @@ namespace ToolSet
                 {
                     if (plan.phase == ToolPlanPhase.Ready)
                     {
-                        using (new EditorGUI.DisabledScope(Running || plan.steps.Count == 0))
-                            if (GUILayout.Button(plan.errors.Count > 0 ? "执行可用更改" : plan.overview.actionLabel, GUILayout.Height(30)))
+                        using (new EditorGUI.DisabledScope(Running || plan.steps.Count == 0 || plan.blockingErrors.Count > 0))
+                            if (GUILayout.Button(plan.blockingErrors.Count > 0 ? "请先处理阻断问题" : plan.errors.Count > 0 ? "执行可用更改" : plan.overview.actionLabel, GUILayout.Height(30)))
                                 EditorApplication.delayCall += () => Start(owner);
                     }
                     else if (runningHere)
                     {
                         var rect = GUILayoutUtility.GetRect(100, 20, GUILayout.ExpandWidth(true));
                         EditorGUI.ProgressBar(rect, (float)next / Math.Max(1, plan.steps.Count), $"{Mathf.RoundToInt(100f * next / Math.Max(1, plan.steps.Count))}%");
-                        if (GUILayout.Button("取消复制", GUILayout.Width(80))) cancel = true;
+                        if (GUILayout.Button("取消", GUILayout.Width(80))) cancel = true;
                     }
                     else if (plan.phase == ToolPlanPhase.Succeeded && plan.overview.ResultPaths.Length > 0)
                     {
@@ -409,8 +484,6 @@ namespace ToolSet
                         if (plan.overview.placeInScene != null && GUILayout.Button(batch ? "将全部副本放入场景" : "将副本放入场景", GUILayout.Height(26)))
                             plan.overview.PlaceResultsInScene();
                     }
-                    using (new EditorGUI.DisabledScope(Running))
-                        if (GUILayout.Button("恢复上次文件操作", GUILayout.Width(135))) EditorApplication.delayCall += () => RestoreLast(owner);
                 }
             }
         }
@@ -428,12 +501,6 @@ namespace ToolSet
             {
                 if (plan == null && state.status != "选择对象 → 生成预览 → 执行 → 查看结果")
                     EditorGUILayout.HelpBox(state.status, state.buildFailed ? MessageType.Error : MessageType.Info);
-                if (EditorPrefs.HasKey(ToolPaths.PreferenceKey("LastBackup")))
-                    using (new EditorGUILayout.HorizontalScope())
-                    {
-                        GUILayout.FlexibleSpace();
-                        if (GUILayout.Button("恢复上次文件操作", GUILayout.Width(135))) EditorApplication.delayCall += () => RestoreLast(owner);
-                    }
                 return;
             }
             using (new EditorGUILayout.VerticalScope(EditorStyles.helpBox))
@@ -460,20 +527,19 @@ namespace ToolSet
             var plan = state.plan;
             bool runningHere = Running && ReferenceEquals(Plan, plan);
             string visibleStatus = runningHere ? Status : state.status;
-            EditorGUILayout.HelpBox(visibleStatus, plan != null && plan.errors.Count > 0 ? MessageType.Warning : MessageType.Info);
+            EditorGUILayout.HelpBox(visibleStatus, plan != null && plan.blockingErrors.Count > 0 ? MessageType.Error :
+                plan != null && plan.errors.Count > 0 ? MessageType.Warning : MessageType.Info);
             using (new EditorGUILayout.HorizontalScope())
             {
-                using (new EditorGUI.DisabledScope(Running || plan == null || plan.steps.Count == 0 || plan.phase != ToolPlanPhase.Ready))
-                    if (GUILayout.Button(plan != null && plan.errors.Count > 0 ? "执行可用更改" : "执行预览中的更改", GUILayout.Height(26)))
+                using (new EditorGUI.DisabledScope(Running || plan == null || plan.steps.Count == 0 || plan.phase != ToolPlanPhase.Ready || plan.blockingErrors.Count > 0))
+                    if (GUILayout.Button(plan != null && plan.blockingErrors.Count > 0 ? "请先处理阻断问题" : plan != null && plan.errors.Count > 0 ? "执行可用更改" : "执行预览中的更改", GUILayout.Height(26)))
                         EditorApplication.delayCall += () => Start(owner);
                 using (new EditorGUI.DisabledScope(!runningHere)) if (GUILayout.Button("取消", GUILayout.Width(60))) cancel = true;
-                using (new EditorGUI.DisabledScope(Running)) if (GUILayout.Button("恢复上次文件操作", GUILayout.Width(135)))
-                    EditorApplication.delayCall += () => RestoreLast(owner);
             }
             if (plan == null) return;
             state.filter = EditorGUILayout.TextField("筛选结果", state.filter);
             state.onlyProblems = EditorGUILayout.ToggleLeft("仅显示问题", state.onlyProblems);
-            var lines = plan.errors.Select(e => "[问题] " + e).Concat(plan.steps.Where(s => !state.onlyProblems || s.state.StartsWith("失败") || s.state == "取消").Select(s => "[" + s.state + "] " + s.description))
+            var lines = plan.blockingErrors.Select(e => "[阻断] " + e).Concat(plan.errors.Select(e => "[问题] " + e)).Concat(plan.steps.Where(s => !state.onlyProblems || s.state.StartsWith("失败") || s.state == "取消").Select(s => "[" + s.state + "] " + s.description))
                 .Where(s => s.IndexOf(state.filter, StringComparison.OrdinalIgnoreCase) >= 0).ToArray();
             const int size = 30;
             state.page = Mathf.Clamp(state.page, 0, Math.Max(0, (lines.Length - 1) / size));
@@ -482,7 +548,7 @@ namespace ToolSet
                 if (GUILayout.Button("上一页", GUILayout.Width(65))) state.page = Math.Max(0, state.page - 1);
                 GUILayout.Label($"{state.page + 1}/{Math.Max(1, (lines.Length + size - 1) / size)} 页 · {lines.Length} 项");
                 if (GUILayout.Button("下一页", GUILayout.Width(65))) state.page = Math.Min(Math.Max(0, (lines.Length - 1) / size), state.page + 1);
-                if (GUILayout.Button("复制报告", GUILayout.Width(80))) EditorGUIUtility.systemCopyBuffer = plan.title + "\n" + visibleStatus + "\n" + string.Join("\n", plan.errors.Concat(plan.steps.Select(s => s.state + " " + s.description)));
+                if (GUILayout.Button("复制报告", GUILayout.Width(80))) EditorGUIUtility.systemCopyBuffer = plan.title + "\n" + visibleStatus + "\n" + string.Join("\n", plan.blockingErrors.Select(e => "阻断 " + e).Concat(plan.errors.Select(e => "问题 " + e)).Concat(plan.steps.Select(s => s.state + " " + s.description)));
             }
             state.scroll = EditorGUILayout.BeginScrollView(state.scroll, GUILayout.Height(110));
             foreach (string line in lines.Skip(state.page * size).Take(size)) EditorGUILayout.SelectableLabel(line, GUILayout.Height(18));
