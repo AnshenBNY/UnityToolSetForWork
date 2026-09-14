@@ -112,8 +112,8 @@ namespace ToolSet
                     }
                 }
 
-                // Blocking problems are visible without requiring the artist to open the log.
-                foreach (string error in plan.errors.Take(5)) EditorGUILayout.HelpBox(error, MessageType.Error);
+                // Skipped problems are visible without requiring the artist to open the log.
+                foreach (string error in plan.errors.Take(5)) EditorGUILayout.HelpBox(error, MessageType.Warning);
                 if (plan.errors.Count > 5) EditorGUILayout.LabelField($"另有 {plan.errors.Count - 5} 项问题，详见操作记录。", EditorStyles.wordWrappedMiniLabel);
 
                 EditorGUILayout.Space(4);

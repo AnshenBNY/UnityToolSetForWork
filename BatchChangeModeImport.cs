@@ -46,29 +46,33 @@ namespace ToolSet
             Invalidate();
             var plan = new ToolPlan { title = "模型导入设置" };
             if (!applyMaterialImportMode && !applyAnimationError && !applyAvatarDefinition) plan.errors.Add("至少选择一组参数。");
-            if (applyAnimationError && new[] { animationRotationError, animationPositionError, animationScaleError }.Any(v => float.IsNaN(v) || float.IsInfinity(v) || v < 0))
+            bool animationValid = !applyAnimationError || !new[] { animationRotationError, animationPositionError, animationScaleError }.Any(v => float.IsNaN(v) || float.IsInfinity(v) || v < 0);
+            if (!animationValid)
                 plan.errors.Add("动画误差必须为有限的非负数。");
-            if (applyAvatarDefinition && avatarDefinition == AvatarDefinition.CopyFromOtherAvatar && (sourceAvatar == null || !sourceAvatar.isValid))
+            bool avatarValid = !applyAvatarDefinition || avatarDefinition != AvatarDefinition.CopyFromOtherAvatar || sourceAvatar != null && sourceAvatar.isValid;
+            if (!avatarValid)
                 plan.errors.Add("请选择有效的来源 Avatar。");
             var materialMode = (ModelImporterMaterialImportMode)importMode;
             var setup = (ModelImporterAvatarSetup)avatarDefinition;
             float rotation = animationRotationError, position = animationPositionError, scale = animationScaleError;
-            bool material = applyMaterialImportMode, animation = applyAnimationError, avatar = applyAvatarDefinition;
+            bool material = applyMaterialImportMode, animation = applyAnimationError && animationValid, avatar = applyAvatarDefinition && avatarValid;
             Avatar avatarSource = sourceAvatar;
             if (avatarSource != null) plan.Watch(AssetDatabase.GetAssetPath(avatarSource));
             foreach (string path in Selected)
             {
                 var importer = (ModelImporter)AssetImporter.GetAtPath(path);
+                bool applyAvatarToCurrent = avatar;
                 if (avatar && setup == ModelImporterAvatarSetup.CopyFromOther && AssetDatabase.GetAssetPath(avatarSource) == path)
-                { plan.errors.Add("来源 Avatar 不能来自目标模型自身：" + path); continue; }
+                { plan.errors.Add("已跳过该模型的 Avatar 设置，来源 Avatar 不能来自目标模型自身：" + path); applyAvatarToCurrent = false; }
                 var changes = new List<string>();
                 if (material && importer.materialImportMode != materialMode) changes.Add("材质 " + importer.materialImportMode + " → " + materialMode);
                 if (animation && (!Mathf.Approximately(importer.animationRotationError, rotation) || !Mathf.Approximately(importer.animationPositionError, position) || !Mathf.Approximately(importer.animationScaleError, scale)))
                     changes.Add($"动画误差 ({importer.animationRotationError}, {importer.animationPositionError}, {importer.animationScaleError}) → ({rotation}, {position}, {scale})");
-                if (avatar && (importer.avatarSetup != setup || setup == ModelImporterAvatarSetup.CopyFromOther && importer.sourceAvatar != avatarSource))
+                if (applyAvatarToCurrent && (importer.avatarSetup != setup || setup == ModelImporterAvatarSetup.CopyFromOther && importer.sourceAvatar != avatarSource))
                     changes.Add("Avatar " + importer.avatarSetup + " → " + setup);
                 if (changes.Count == 0) continue;
-                try { ToolPaths.RequireWritableAsset(path + ".meta"); } catch (Exception e) { plan.errors.Add(e.Message); }
+                try { ToolPaths.RequireWritableAsset(path + ".meta"); } catch (Exception e) { plan.errors.Add(e.Message); continue; }
+                bool setAvatar = applyAvatarToCurrent;
                 plan.Watch(path);
                 plan.Add(path + " · " + string.Join("；", changes), transaction =>
                 {
@@ -77,7 +81,7 @@ namespace ToolSet
                     if (current == null) throw new InvalidOperationException("模型导入器丢失：" + path);
                     if (material) current.materialImportMode = materialMode;
                     if (animation) { current.animationRotationError = rotation; current.animationPositionError = position; current.animationScaleError = scale; }
-                    if (avatar) { current.avatarSetup = setup; current.sourceAvatar = setup == ModelImporterAvatarSetup.CopyFromOther ? avatarSource : null; }
+                    if (setAvatar) { current.avatarSetup = setup; current.sourceAvatar = setup == ModelImporterAvatarSetup.CopyFromOther ? avatarSource : null; }
                     current.SaveAndReimport();
                 });
             }

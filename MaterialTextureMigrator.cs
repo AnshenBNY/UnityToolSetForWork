@@ -54,11 +54,12 @@ namespace ToolSet
                     if (texture == null) continue;
                     string original = AssetDatabase.GetAssetPath(texture);
                     if (string.IsNullOrEmpty(original) || !System.IO.File.Exists(original) || ToolPaths.Contains(target, original) || excluded.Any(e => ToolPaths.Contains(e, original))) continue;
-                    if (!copies.ContainsKey(original)) copies.Add(original, paths.Reserve(original, target, ""));
                     slots[slot.propertyPath] = texture;
                 }
                 if (slots.Count == 0) continue;
-                try { ToolPaths.RequireWritableAsset(path); } catch (Exception e) { plan.errors.Add(e.Message); }
+                try { ToolPaths.RequireWritableAsset(path); } catch (Exception e) { plan.errors.Add(e.Message); continue; }
+                foreach (string original in slots.Values.Select(AssetDatabase.GetAssetPath).Distinct(StringComparer.OrdinalIgnoreCase))
+                    if (!copies.ContainsKey(original)) copies.Add(original, paths.Reserve(original, target, ""));
                 plan.Watch(path); edits.Add((path, slots));
             }
             foreach (var copy in copies)

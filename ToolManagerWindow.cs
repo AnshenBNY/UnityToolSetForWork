@@ -60,13 +60,18 @@ public class ToolManagerWindow : EditorWindow
                 try
                 {
                     using (new EditorGUI.DisabledScope(ToolWorkflow.Running))
-                        if (tools.TryGetValue(currentTab, out var panel)) panel.DrawGUI();
+                        if (tools.TryGetValue(currentTab, out var panel))
+                        {
+                            ToolWorkflow.SetActiveOwner(panel.GetType().Name);
+                            panel.DrawGUI();
+                        }
                     if (!string.IsNullOrEmpty(error)) EditorGUILayout.HelpBox(error, MessageType.Error);
                 }
                 catch (ExitGUIException) { throw; }
                 catch (Exception e) { error = e.Message; Debug.LogException(e); }
                 finally { EditorGUILayout.EndScrollView(); }
-                ToolWorkflow.Draw(currentTab == 0 ? nameof(PrefabCopyTool) : null, position.height);
+                if (tools.TryGetValue(currentTab, out var activePanel))
+                    ToolWorkflow.Draw(activePanel.GetType().Name, position.height);
             }
         }
     }

@@ -127,20 +127,57 @@ namespace ToolSet
             if (renameTarget == RenameTarget.资源文件)
             {
                 var selected = GetSelectedAssetPaths();
-                var changes = selected.Select((p, i) => new {
-                    oldPath = p, guid = AssetDatabase.AssetPathToGUID(p),
-                    name = BuildNewName(Path.GetFileNameWithoutExtension(p), i + 1),
-                    temp = AssetDatabase.GenerateUniqueAssetPath(Path.GetDirectoryName(p).Replace('\\', '/') + "/__ToolSet_" + Guid.NewGuid().ToString("N") + Path.GetExtension(p))
-                }).Where(c => c.name != Path.GetFileNameWithoutExtension(c.oldPath)).ToArray();
-                var destinations = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                var moving = new HashSet<string>(changes.Select(c => c.oldPath), StringComparer.OrdinalIgnoreCase);
-                foreach (var c in changes)
+                var changes = selected.Select((p, i) =>
                 {
-                    string destination = Path.GetDirectoryName(c.oldPath).Replace('\\', '/') + "/" + c.name + Path.GetExtension(c.oldPath);
-                    if (!ValidName(c.name)) plan.errors.Add("无效文件名：" + c.name);
-                    if (!destinations.Add(destination) || (File.Exists(destination) && !moving.Contains(destination)) || Directory.Exists(destination))
-                        plan.errors.Add("目标名称冲突：" + destination);
-                    try { ToolPaths.RequireWritableAsset(c.oldPath); } catch (Exception e) { plan.errors.Add(e.Message); }
+                    string name = BuildNewName(Path.GetFileNameWithoutExtension(p), i + 1);
+                    return new {
+                        oldPath = p, guid = AssetDatabase.AssetPathToGUID(p), name,
+                        destination = Path.GetDirectoryName(p).Replace('\\', '/') + "/" + name + Path.GetExtension(p),
+                        temp = AssetDatabase.GenerateUniqueAssetPath(Path.GetDirectoryName(p).Replace('\\', '/') + "/__ToolSet_" + Guid.NewGuid().ToString("N") + Path.GetExtension(p))
+                    };
+                }).Where(c => c.name != Path.GetFileNameWithoutExtension(c.oldPath)).ToArray();
+                var validChanges = changes.Where(c =>
+                {
+                    if (ValidName(c.name)) return true;
+                    plan.errors.Add("无效文件名：" + c.name); return false;
+                }).ToList();
+                foreach (var duplicate in validChanges.GroupBy(c => c.destination, StringComparer.OrdinalIgnoreCase).Where(g => g.Count() > 1).ToArray())
+                {
+                    plan.errors.Add("目标名称冲突：" + duplicate.Key);
+                    validChanges.RemoveAll(c => string.Equals(c.destination, duplicate.Key, StringComparison.OrdinalIgnoreCase));
+                }
+                bool removed;
+                do
+                {
+                    removed = false;
+                    var moving = new HashSet<string>(validChanges.Select(c => c.oldPath), StringComparer.OrdinalIgnoreCase);
+                    foreach (var c in validChanges.ToArray())
+                    {
+                        string destination = c.destination;
+                        if ((!string.Equals(destination, c.oldPath, StringComparison.OrdinalIgnoreCase) && File.Exists(destination) && !moving.Contains(destination)) || Directory.Exists(destination))
+                        {
+                            plan.errors.Add("目标名称冲突：" + destination);
+                            validChanges.Remove(c); removed = true;
+                        }
+                    }
+                } while (removed);
+                foreach (var c in validChanges.ToArray())
+                    try { ToolPaths.RequireWritableAsset(c.oldPath); }
+                    catch (Exception e) { plan.errors.Add(e.Message); validChanges.Remove(c); }
+                do
+                {
+                    removed = false;
+                    var moving = new HashSet<string>(validChanges.Select(c => c.oldPath), StringComparer.OrdinalIgnoreCase);
+                    foreach (var c in validChanges.ToArray())
+                        if ((!string.Equals(c.destination, c.oldPath, StringComparison.OrdinalIgnoreCase) && File.Exists(c.destination) && !moving.Contains(c.destination)) || Directory.Exists(c.destination))
+                        {
+                            plan.errors.Add("目标名称冲突：" + c.destination);
+                            validChanges.Remove(c); removed = true;
+                        }
+                } while (removed);
+                foreach (var c in validChanges)
+                {
+                    string destination = c.destination;
                     plan.Watch(c.oldPath); plan.Watch(destination); plan.Watch(c.temp);
                     plan.Add("准备重命名 " + c.oldPath, transaction =>
                     {
@@ -149,7 +186,7 @@ namespace ToolSet
                         if (!string.IsNullOrEmpty(error)) throw new IOException(error);
                     });
                 }
-                foreach (var c in changes)
+                foreach (var c in validChanges)
                     plan.Add(c.oldPath + " → " + c.name + Path.GetExtension(c.oldPath), transaction =>
                     {
                         string error = AssetDatabase.RenameAsset(AssetDatabase.GUIDToAssetPath(c.guid), c.name);
@@ -159,9 +196,13 @@ namespace ToolSet
             else
             {
                 var changes = GetSelectedHierarchyNodes(includeChildren).Select((go, i) => new { go, before = go.name, after = BuildNewName(go.name, i + 1) }).Where(c => c.before != c.after).ToArray();
-                foreach (var c in changes)
+                var validChanges = changes.Where(c =>
                 {
-                    if (!ValidName(c.after)) plan.errors.Add("无效节点名称：" + c.after);
+                    if (ValidName(c.after)) return true;
+                    plan.errors.Add("无效节点名称：" + c.after); return false;
+                }).ToArray();
+                foreach (var c in validChanges)
+                {
                     plan.Add(GetHierarchyPath(c.go.transform) + " → " + c.after, transaction =>
                     {
                         if (c.go == null || c.go.name != c.before) throw new InvalidOperationException("节点已改变，请重新预览。");
@@ -172,7 +213,7 @@ namespace ToolSet
                 }
                 plan.rollback = () =>
                 {
-                    foreach (var c in changes)
+                    foreach (var c in validChanges)
                         if (c.go != null && c.go.name == c.after)
                         {
                             c.go.name = c.before;
@@ -180,7 +221,7 @@ namespace ToolSet
                             EditorSceneManager.MarkSceneDirty(c.go.scene);
                         }
                 };
-                plan.validate = () => changes.Any(c => c.go == null || c.go.name != c.before) ? "节点已改变，请重新预览。" : null;
+                plan.validate = () => validChanges.Any(c => c.go == null || c.go.name != c.before) ? "节点已改变，请重新预览。" : null;
             }
             plan.completed = Invalidate;
             return plan;
