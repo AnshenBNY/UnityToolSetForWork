@@ -211,10 +211,14 @@ namespace ToolSet
             ToolUi.EndCard();
 
             ToolUi.BeginCard("4) 保存加工后的副本");
-            using (new EditorGUI.DisabledScope(!hasInstances))
-                if (GUILayout.Button(sceneInstances.Count > 1 ? $"预览保存所选副本（{sceneInstances.Count} 个）" : "预览保存副本", GUILayout.Height(30)))
+            bool needsNewDestination = hasInstances && sceneInstances.Any(instance => instance != null &&
+                !IsManagedRootCopy(PrefabUtility.GetPrefabAssetPathOfNearestInstanceRoot(instance), outputPath));
+            if (needsNewDestination && !validOutput)
+                EditorGUILayout.HelpBox("普通场景实例需要有效的输出目录，工具会在其中新建 Prefabs 副本。", MessageType.Warning);
+            using (new EditorGUI.DisabledScope(!hasInstances || (needsNewDestination && !validOutput)))
+                if (GUILayout.Button(sceneInstances.Count > 1 ? $"预览保存加工副本（{sceneInstances.Count} 个）" : "预览保存加工副本", GUILayout.Height(30)))
                     ToolWorkflow.Preview(BuildSceneSavePlan, SceneWorkflowOwner);
-            EditorGUILayout.LabelField("仅支持保存本窗口中由完整复制生成并放入场景的根副本；场景修改可用 Ctrl+Z 撤销。", EditorStyles.wordWrappedMiniLabel);
+            EditorGUILayout.LabelField("普通实例会在输出目录新建独立副本；工具副本会更新原副本文件。原始预制体不会被覆盖。", EditorStyles.wordWrappedMiniLabel);
             ToolUi.EndCard();
         }
 

@@ -66,6 +66,14 @@ namespace ToolSet
 
     public partial class PrefabCopyTool
     {
+        sealed class SceneSaveTarget
+        {
+            public GameObject instance;
+            public string sourcePath;
+            public string destinationPath;
+            public bool saveInPlace;
+        }
+
         // Scene references are deliberately not included in ToolPreferences.
         readonly List<GameObject> sceneInstances = new List<GameObject>();
         int scenePage;
@@ -204,39 +212,117 @@ namespace ToolSet
         internal ToolPlan BuildSceneSavePlan()
         {
             var instances = RequireSceneInstances();
-            var targets = new Dictionary<string, GameObject>(StringComparer.OrdinalIgnoreCase);
+            string output = AssetDatabase.GetAssetPath(outputFolder);
+            var targets = new List<SceneSaveTarget>();
+            var inPlacePaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var reservedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            string newCopyFolder = null;
             foreach (var instance in instances)
             {
-                string path = PrefabUtility.GetPrefabAssetPathOfNearestInstanceRoot(instance);
-                if (!rootCopyPaths.Contains(path)) throw new InvalidOperationException("只能保存本工具在当前窗口会话中生成的根副本：" + instance.name);
-                if (targets.ContainsKey(path)) throw new InvalidOperationException("多个实例对应同一个副本文件，请只保留其中一个再保存，避免不同修改相互覆盖：" + path);
-                ToolPaths.RequireWritableAsset(path);
-                targets.Add(path, instance);
+                string sourcePath = PrefabUtility.GetPrefabAssetPathOfNearestInstanceRoot(instance);
+                bool saveInPlace = IsManagedRootCopy(sourcePath, output);
+                string destinationPath;
+                if (saveInPlace)
+                {
+                    if (!inPlacePaths.Add(sourcePath)) throw new InvalidOperationException("多个实例对应同一个副本文件，请只保留其中一个再保存，避免不同修改相互覆盖：" + sourcePath);
+                    ToolPaths.RequireWritableAsset(sourcePath);
+                    destinationPath = sourcePath;
+                }
+                else
+                {
+                    if (!AssetDatabase.IsValidFolder(output) || !ToolPaths.Contains("Assets", output))
+                        throw new InvalidOperationException("普通场景实例需要在输出目录中另存为新副本，请选择 Assets 内的有效输出目录。");
+                    ToolPaths.RequireSavedAsset(sourcePath);
+                    newCopyFolder = output + "/" + SubDirPrefabs;
+                    if (File.Exists(newCopyFolder)) throw new InvalidOperationException("预制体输出目录被同名文件占用：" + newCopyFolder);
+                    destinationPath = ReserveSceneSavePath(sourcePath, newCopyFolder, reservedPaths);
+                }
+                targets.Add(new SceneSaveTarget { instance = instance, sourcePath = sourcePath, destinationPath = destinationPath, saveInPlace = saveInPlace });
             }
             string input = SceneCopyInputSignature();
             var snapshot = new SceneCopySnapshot(instances);
+            int newCopies = targets.Count(t => !t.saveInPlace);
+            int updates = targets.Count - newCopies;
             var plan = new ToolPlan
             {
-                title = $"保存 {instances.Length} 个预制体副本", owner = SceneWorkflowOwner,
-                overview = new CopyOverview { sourceName = $"{instances.Length} 个场景实例", actionLabel = instances.Length > 1 ? "保存所选副本" : "保存副本",
-                    description = "将以下实例的修改保存到各自副本。嵌套对象的修改保存在根副本中。" }
+                title = $"保存 {instances.Length} 个加工副本", owner = SceneWorkflowOwner,
+                overview = new CopyOverview { sourceName = $"{instances.Length} 个场景实例", actionLabel = instances.Length > 1 ? "保存所选加工副本" : "保存加工副本",
+                    description = newCopies > 0 && updates > 0 ? $"新建 {newCopies} 个独立副本，更新 {updates} 个工具副本；不会覆盖原始预制体。" :
+                        newCopies > 0 ? $"在输出目录新建 {newCopies} 个独立副本；不会覆盖原始预制体。" : "将修改更新到工具生成的副本文件。" }
             };
             plan.overview.sceneTargets.AddRange(instances);
-            plan.validate = () => SceneCopyInputSignature() != input || snapshot.Changed() || targets.Any(p => !IsSceneInstance(p.Value) || PrefabUtility.GetPrefabAssetPathOfNearestInstanceRoot(p.Value) != p.Key) ? "保存对象或实例内容已更改，请重新整理保存清单。" : null;
+            plan.validate = () => SceneCopyInputSignature() != input || snapshot.Changed() || targets.Any(t => !IsSceneInstance(t.instance) || PrefabUtility.GetPrefabAssetPathOfNearestInstanceRoot(t.instance) != t.sourcePath) ? "保存对象或实例内容已更改，请重新整理保存清单。" : null;
             plan.rollback = snapshot.Restore;
+            if (newCopyFolder != null && !AssetDatabase.IsValidFolder(newCopyFolder))
+            {
+                string folderToCreate = newCopyFolder;
+                plan.Add("创建预制体输出目录 " + folderToCreate, transaction =>
+                {
+                    if (Directory.Exists(folderToCreate)) throw new IOException("输出目录在预览后被创建，请重新预览：" + folderToCreate);
+                    transaction.CaptureNewFolder(folderToCreate);
+                    if (string.IsNullOrEmpty(AssetDatabase.CreateFolder(output, Path.GetFileName(folderToCreate)))) throw new IOException("创建目录失败：" + folderToCreate);
+                }, "正在准备预制体输出目录");
+            }
             foreach (var target in targets)
             {
-                plan.overview.roots.Add(new CopyResource { source = target.Key, destination = target.Key, category = "预制体" });
-                plan.Watch(target.Key);
-                plan.Add("保存 " + target.Value.name + " → " + target.Key, transaction =>
+                plan.overview.roots.Add(new CopyResource { source = target.sourcePath, destination = target.destinationPath, category = "预制体" });
+                plan.Watch(target.sourcePath);
+                plan.Watch(target.destinationPath);
+                plan.Add("保存 " + target.instance.name + " → " + target.destinationPath, transaction =>
                 {
-                    ToolPaths.RequireWritableAsset(target.Key);
-                    transaction.Capture(target.Key);
-                    PrefabUtility.SaveAsPrefabAsset(target.Value, target.Key, out bool success);
-                    if (!success) throw new IOException("保存预制体副本失败：" + target.Key);
-                }, "正在保存：" + target.Value.name);
+                    if (target.saveInPlace) ToolPaths.RequireWritableAsset(target.destinationPath);
+                    else if (File.Exists(target.destinationPath) || File.Exists(target.destinationPath + ".meta")) throw new IOException("副本路径在预览后被占用，请重新预览：" + target.destinationPath);
+                    transaction.Capture(target.destinationPath);
+                    if (target.saveInPlace)
+                    {
+                        PrefabUtility.SaveAsPrefabAsset(target.instance, target.destinationPath, out bool success);
+                        if (!success) throw new IOException("保存预制体副本失败：" + target.destinationPath);
+                    }
+                    else SaveIndependentScenePrefab(target.instance, target.destinationPath);
+                }, "正在保存：" + target.instance.name);
             }
+            plan.completed = () => { foreach (var target in targets) rootCopyPaths.Add(target.destinationPath); };
             return plan;
+        }
+
+        bool IsManagedRootCopy(string path, string output)
+        {
+            if (rootCopyPaths.Contains(path)) return true;
+            if (!AssetDatabase.IsValidFolder(output) || !ToolPaths.Contains(output + "/" + SubDirPrefabs, path)) return false;
+            string name = Path.GetFileNameWithoutExtension(path);
+            int marker = name.LastIndexOf("_Copy", StringComparison.OrdinalIgnoreCase);
+            if (marker < 0) return false;
+            string suffix = name.Substring(marker + 5);
+            return suffix.Length == 0 || (suffix[0] == '_' && int.TryParse(suffix.Substring(1), out _));
+        }
+
+        static string ReserveSceneSavePath(string sourcePath, string folder, HashSet<string> reserved)
+        {
+            string stem = folder + "/" + Path.GetFileNameWithoutExtension(sourcePath) + "_Copy";
+            string destination = stem + ".prefab";
+            int index = 1;
+            while (reserved.Contains(destination) || File.Exists(destination) || File.Exists(destination + ".meta") || Directory.Exists(destination))
+                destination = stem + "_" + index++ + ".prefab";
+            reserved.Add(destination);
+            return destination;
+        }
+
+        static void SaveIndependentScenePrefab(GameObject instance, string destination)
+        {
+            GameObject clone = null;
+            try
+            {
+                clone = Object.Instantiate(instance);
+                clone.name = instance.name;
+                if (PrefabUtility.IsPartOfPrefabInstance(clone))
+                    PrefabUtility.UnpackPrefabInstance(clone, PrefabUnpackMode.OutermostRoot, InteractionMode.AutomatedAction);
+                PrefabUtility.SaveAsPrefabAsset(clone, destination, out bool success);
+                if (!success) throw new IOException("新建独立预制体副本失败：" + destination);
+            }
+            finally
+            {
+                if (clone != null) Object.DestroyImmediate(clone);
+            }
         }
     }
 }

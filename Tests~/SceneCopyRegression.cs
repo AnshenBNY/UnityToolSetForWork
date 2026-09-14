@@ -205,8 +205,9 @@ internal static class SceneCopyRegression
             {
                 Require(instances.Length == 2, "putting batch into scene fills the entire scene input list");
                 foreach (var instance in instances) { instance.GetComponent<Renderer>().enabled = false; PrefabUtility.RecordPrefabInstancePropertyModifications(instance.GetComponent<Renderer>()); }
+                ((HashSet<string>)typeof(PrefabCopyTool).GetField("rootCopyPaths", Fields).GetValue(tool)).Clear();
                 var save = tool.BuildSceneSavePlan(); Require(save.overview.sceneTargets.Count == 2, "save summary includes both scene targets"); RunPlan(save);
-                Require(copy.overview.ResultPaths.All(p => !AssetDatabase.LoadAssetAtPath<GameObject>(p).GetComponent<Renderer>().enabled), "both generated prefab files saved");
+                Require(copy.overview.ResultPaths.All(p => !AssetDatabase.LoadAssetAtPath<GameObject>(p).GetComponent<Renderer>().enabled), "generated prefab files remain recognizable and save after session tracking is lost");
                 duplicate = (GameObject)PrefabUtility.InstantiatePrefab(AssetDatabase.LoadAssetAtPath<GameObject>(copy.overview.ResultPaths[0])); tool.AddSceneInstances(new[] { duplicate });
                 bool blocked = false; try { tool.BuildSceneSavePlan(); } catch (InvalidOperationException e) { blocked = e.Message.Contains("同一个副本文件"); }
                 Require(blocked, "two instances targeting one file are rejected before writes");
@@ -227,7 +228,18 @@ internal static class SceneCopyRegression
                 Require(failed && originals.All(p => ToolPaths.Fingerprint(p.Key) == p.Value), "all prefab files and metas restored");
                 Require(instances.All(o => !o.GetComponent<Renderer>().enabled), "artist's unsaved scene changes retained after rollback");
                 var originalInstance = (GameObject)PrefabUtility.InstantiatePrefab(source);
-                try { Inputs(tool).Clear(); tool.AddSceneInstances(new[] { originalInstance }); bool blocked = false; try { tool.BuildSceneSavePlan(); } catch (InvalidOperationException) { blocked = true; } Require(blocked, "original source prefab cannot be overwritten by batch save"); }
+                try
+                {
+                    originalInstance.GetComponent<Renderer>().enabled = false;
+                    var saveOriginalTool = Tool(new[] { originalInstance }, "Assets/SceneSaveOriginal");
+                    var saveOriginal = saveOriginalTool.BuildSceneSavePlan();
+                    Require(saveOriginal.overview.ResultPaths.Length == 1 && saveOriginal.overview.ResultPaths[0] != AssetDatabase.GetAssetPath(source), "original instance is assigned a new destination");
+                    RunPlan(saveOriginal);
+                    var savedCopy = AssetDatabase.LoadAssetAtPath<GameObject>(saveOriginal.overview.ResultPaths[0]);
+                    Require(savedCopy != null && !savedCopy.GetComponent<Renderer>().enabled, "processed scene values are saved to the new prefab");
+                    Require(PrefabUtility.GetPrefabAssetType(savedCopy) == PrefabAssetType.Regular, "scene save creates an independent regular prefab");
+                    Require(AssetDatabase.LoadAssetAtPath<GameObject>(AssetDatabase.GetAssetPath(source)).GetComponent<Renderer>().enabled, "original source prefab remains unchanged");
+                }
                 finally { Object.DestroyImmediate(originalInstance); }
             }
             finally { Destroy(instances); }
