@@ -380,7 +380,7 @@ public static class ToolSetRegression
             ToolWorkflow.Start();
             Require(!ToolWorkflow.Running&&plan.phase==ToolPlanPhase.Failed,"stale settings block execution");
             Require(!Directory.EnumerateFileSystemEntries("Assets/PreparedCopyA").Any()&&!Directory.EnumerateFileSystemEntries("Assets/PreparedCopyB").Any(),"neither output receives unconfirmed copies");
-            ToolWorkflow.DiscardPreparedPlan(nameof(PrefabCopyTool));
+            ToolWorkflow.DiscardPreparedPlan(PrefabCopyTool.CompleteWorkflowOwner);
             Require(ToolWorkflow.Plan==null,"stale copy summary can be discarded");
         });
         Case("Completed operations cannot be accidentally started twice", () =>

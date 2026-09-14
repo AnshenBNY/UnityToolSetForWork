@@ -103,15 +103,15 @@ namespace ToolSet
             if (changed)
             {
                 scenePage = Math.Max(0, (sceneInstances.Count - 1) / 6);
-                ToolWorkflow.DiscardPreparedPlan(nameof(PrefabCopyTool));
+                ToolWorkflow.DiscardPreparedPlan(SceneWorkflowOwner);
             }
         }
 
-        void DrawSceneInstances()
+        void DrawSceneInstances(string title = "场景实例")
         {
             using (new EditorGUILayout.VerticalScope(EditorStyles.helpBox))
             {
-                EditorGUILayout.LabelField($"场景实例 · {sceneInstances.Count} 个", EditorStyles.boldLabel);
+                EditorGUILayout.LabelField($"{title} · {sceneInstances.Count} 个", EditorStyles.boldLabel);
                 var drop = GUILayoutUtility.GetRect(0, 42, GUILayout.ExpandWidth(true));
                 GUI.Box(drop, "将 Hierarchy 中的一个或多个预制体根实例拖到这里", EditorStyles.helpBox);
                 var evt = Event.current;
@@ -154,16 +154,16 @@ namespace ToolSet
             var instances = RequireSceneInstances();
             string folder = AssetDatabase.GetAssetPath(outputFolder);
             if (!AssetDatabase.IsValidFolder(folder) || !ToolPaths.Contains("Assets", folder)) throw new InvalidOperationException("请选择 Assets 内的有效输出目录。");
-            string input = CopyInputSignature();
+            string input = SceneCopyInputSignature();
             var snapshot = new SceneCopySnapshot(instances);
             var plan = new ToolPlan
             {
-                title = $"复制{title} · {instances.Length} 个场景实例", owner = nameof(PrefabCopyTool),
+                title = $"复制{title} · {instances.Length} 个场景实例", owner = SceneWorkflowOwner,
                 overview = new CopyOverview { sourceName = $"{instances.Length} 个场景实例", outputFolder = folder, actionLabel = "复制" + title,
                     description = $"处理以下全部实例的{title}，本批次共用的资源只复制一份。修改保留在实例中；完成后可保存本工具生成的副本。" }
             };
             plan.overview.sceneTargets.AddRange(instances);
-            plan.validate = () => CopyInputSignature() != input || snapshot.Changed() || instances.Any(i => !IsSceneInstance(i)) ? "实例、层级或复制设置已更改，请重新整理操作内容。" : null;
+            plan.validate = () => SceneCopyInputSignature() != input || snapshot.Changed() || instances.Any(i => !IsSceneInstance(i)) ? "实例、层级或复制设置已更改，请重新整理操作内容。" : null;
             int undoGroup = -1;
             plan.rollback = () =>
             {
@@ -213,16 +213,16 @@ namespace ToolSet
                 ToolPaths.RequireWritableAsset(path);
                 targets.Add(path, instance);
             }
-            string input = CopyInputSignature();
+            string input = SceneCopyInputSignature();
             var snapshot = new SceneCopySnapshot(instances);
             var plan = new ToolPlan
             {
-                title = $"保存 {instances.Length} 个预制体副本", owner = nameof(PrefabCopyTool),
+                title = $"保存 {instances.Length} 个预制体副本", owner = SceneWorkflowOwner,
                 overview = new CopyOverview { sourceName = $"{instances.Length} 个场景实例", actionLabel = instances.Length > 1 ? "保存所选副本" : "保存副本",
                     description = "将以下实例的修改保存到各自副本。嵌套对象的修改保存在根副本中。" }
             };
             plan.overview.sceneTargets.AddRange(instances);
-            plan.validate = () => CopyInputSignature() != input || snapshot.Changed() || targets.Any(p => !IsSceneInstance(p.Value) || PrefabUtility.GetPrefabAssetPathOfNearestInstanceRoot(p.Value) != p.Key) ? "保存对象或实例内容已更改，请重新整理保存清单。" : null;
+            plan.validate = () => SceneCopyInputSignature() != input || snapshot.Changed() || targets.Any(p => !IsSceneInstance(p.Value) || PrefabUtility.GetPrefabAssetPathOfNearestInstanceRoot(p.Value) != p.Key) ? "保存对象或实例内容已更改，请重新整理保存清单。" : null;
             plan.rollback = snapshot.Restore;
             foreach (var target in targets)
             {

@@ -66,7 +66,7 @@ public class ToolManagerWindow : EditorWindow
                     using (new EditorGUI.DisabledScope(ToolWorkflow.Running))
                         if (tools.TryGetValue(currentTab, out var panel))
                         {
-                            ToolWorkflow.SetActiveOwner(panel.GetType().Name);
+                            ToolWorkflow.SetActiveOwner((panel as ToolPanel)?.WorkflowOwner ?? panel.GetType().Name);
                             panel.DrawGUI();
                         }
                     if (!string.IsNullOrEmpty(error)) EditorGUILayout.HelpBox(error, MessageType.Error);
@@ -76,8 +76,9 @@ public class ToolManagerWindow : EditorWindow
                 finally { EditorGUILayout.EndScrollView(); }
                 if (tools.TryGetValue(currentTab, out var activePanel))
                 {
-                    if (ToolWorkflow.Running && !ToolWorkflow.IsRunningOwner(activePanel.GetType().Name)) ToolWorkflow.DrawRunningStrip();
-                    ToolWorkflow.Draw(activePanel.GetType().Name, position.height);
+                    string workflowOwner = (activePanel as ToolPanel)?.WorkflowOwner ?? activePanel.GetType().Name;
+                    if (ToolWorkflow.Running && !ToolWorkflow.IsRunningOwner(workflowOwner)) ToolWorkflow.DrawRunningStrip();
+                    ToolWorkflow.Draw(workflowOwner, position.height);
                 }
             }
         }

@@ -135,43 +135,116 @@ namespace ToolSet
         /// </summary>
         public override void DrawGUI()
         {
-            ToolUi.DrawToolHeader("预制体复制", "添加一个或多个预制体，选择输出位置，查看清单后统一复制。");
-            string previousInput = CopyInputSignature();
-            DrawSourcePrefabs();
-            outputFolder = (DefaultAsset)EditorGUILayout.ObjectField("输出目录", outputFolder, typeof(DefaultAsset), false);
-            ToolUi.BeginCard("不复制的资源目录");
-            for (int i = 0; i < excludeFolders.Count; i++)
-                using (new EditorGUILayout.HorizontalScope())
-                {
-                    excludeFolders[i] = (DefaultAsset)EditorGUILayout.ObjectField(excludeFolders[i], typeof(DefaultAsset), false);
-                    if (GUILayout.Button("移除", GUILayout.Width(50))) excludeFolders.RemoveAt(i--);
-                }
-            if (GUILayout.Button("添加排除目录")) excludeFolders.Add(null);
-            ToolUi.EndCard();
-            using (new EditorGUI.DisabledScope(sourcePrefabs.Count == 0))
-                if (GUILayout.Button(sourcePrefabs.Count > 1 ? $"预览复制 {sourcePrefabs.Count} 个预制体…" : "预览复制内容…", GUILayout.Height(32)))
-                    ToolWorkflow.Preview(PrepareCompleteCopy, nameof(PrefabCopyTool));
-            EditorGUILayout.LabelField("先整理复制内容，再点击下方「开始复制」。", EditorStyles.wordWrappedMiniLabel);
-            showAdvanced = EditorGUILayout.Foldout(showAdvanced, "高级：批量处理场景实例", true);
-            if (showAdvanced)
+            ToolUi.DrawToolHeader("预制体复制", "完整复制会生成独立资源副本；场景实例加工用于按需复制材质、网格、动画等资源。");
+            string previousInput = showAdvanced ? SceneCopyInputSignature() : CompleteCopyInputSignature();
+
+            int previousMode = showAdvanced ? 1 : 0;
+            int mode = GUILayout.Toolbar(previousMode, new[] { "完整复制", "场景实例加工" }, GUILayout.Height(28));
+            if (mode != previousMode)
             {
-                EditorGUILayout.HelpBox("从 Hierarchy 添加一个或多个预制体根实例。各模块处理列表中的全部实例，共用资源只复制一份；修改保留在场景中。", MessageType.Info);
-                DrawSceneInstances();
-                using (new EditorGUI.DisabledScope(sceneInstances.Count == 0))
-                {
-                    if (GUILayout.Button("复制材质…")) PrepareCopyStep("材质", CopyMaterialsFromMeshRender);
-                    if (GUILayout.Button("复制粒子材质…")) PrepareCopyStep("粒子材质", CopyMaterialsFromParticle);
-                    if (GUILayout.Button("复制粒子网格…")) PrepareCopyStep("粒子网格", CopyMeshFromParticle);
-                    if (GUILayout.Button("复制 Image / Text 资源…")) PrepareCopyStep("Image / Text 资源", go => CopyImageAndTextResources(go));
-                    if (GUILayout.Button("复制 MeshFilter 网格…")) PrepareCopyStep("MeshFilter 网格", CopyMeshFromMeshFilter);
-                    if (GUILayout.Button("复制动画与 Timeline…")) PrepareCopyStep("动画与 Timeline", CopyAnimationAndTimeline);
-                    if (GUILayout.Button(sceneInstances.Count > 1 ? "保存所选副本…" : "保存副本…"))
-                        ToolWorkflow.Preview(BuildSceneSavePlan, nameof(PrefabCopyTool));
-                }
-                EditorGUILayout.LabelField("保存仅支持本工具生成的根副本；场景修改可用 Ctrl+Z 撤销。", EditorStyles.wordWrappedMiniLabel);
+                showAdvanced = mode == 1;
+                GUI.FocusControl(null);
+                ToolWorkflow.SetActiveOwner(WorkflowOwner);
             }
-            if (previousInput != CopyInputSignature()) ToolWorkflow.DiscardPreparedPlan(nameof(PrefabCopyTool));
-            ToolWorkflow.DrawSummary(nameof(PrefabCopyTool));
+            EditorGUILayout.Space(5);
+
+            if (showAdvanced) DrawSceneCopyWorkspace();
+            else DrawCompleteCopyWorkspace();
+
+            if (mode == previousMode)
+            {
+                string currentInput = showAdvanced ? SceneCopyInputSignature() : CompleteCopyInputSignature();
+                if (previousInput != currentInput)
+                {
+                    ToolWorkflow.DiscardPreparedPlan(CompleteWorkflowOwner);
+                    ToolWorkflow.DiscardPreparedPlan(SceneWorkflowOwner);
+                }
+            }
+            ToolWorkflow.DrawSummary(WorkflowOwner);
+        }
+
+        private void DrawCompleteCopyWorkspace()
+        {
+            EditorGUILayout.HelpBox("从 Project 添加预制体资源。工具会复制根预制体及支持的依赖，并按资源类型整理到输出目录。", MessageType.Info);
+            DrawSourcePrefabs("1) 选择源预制体");
+            DrawCopyOutputSettings("2) 设置输出范围");
+
+            ToolUi.BeginCard("3) 预览并复制");
+            string outputPath = AssetDatabase.GetAssetPath(outputFolder);
+            bool validOutput = AssetDatabase.IsValidFolder(outputPath) && ToolPaths.Contains("Assets", outputPath);
+            if (sourcePrefabs.Count == 0)
+                EditorGUILayout.HelpBox("请先添加至少一个 Project 中的 .prefab 资源。", MessageType.None);
+            else if (!validOutput)
+                EditorGUILayout.HelpBox("请选择 Assets 内的有效输出目录。", MessageType.Warning);
+            else
+                EditorGUILayout.LabelField($"已选择 {sourcePrefabs.Count} 个预制体，副本将保存到 {outputPath}。", EditorStyles.wordWrappedMiniLabel);
+
+            using (new EditorGUI.DisabledScope(sourcePrefabs.Count == 0 || !validOutput))
+                if (GUILayout.Button(sourcePrefabs.Count > 1 ? $"预览完整复制（{sourcePrefabs.Count} 个）" : "预览完整复制", GUILayout.Height(34)))
+                    ToolWorkflow.Preview(PrepareCompleteCopy, CompleteWorkflowOwner);
+            EditorGUILayout.LabelField("预览后在窗口底部确认并开始复制；执行完成时副本已经保存。", EditorStyles.wordWrappedMiniLabel);
+            ToolUi.EndCard();
+        }
+
+        private void DrawSceneCopyWorkspace()
+        {
+            EditorGUILayout.HelpBox("从 Hierarchy 添加预制体根实例，选择需要的资源类型逐项加工。修改保留在场景实例中，共用资源在同一批次只复制一份。", MessageType.Info);
+            DrawSceneInstances("1) 选择场景实例");
+            DrawCopyOutputSettings("2) 设置资源输出范围");
+
+            string outputPath = AssetDatabase.GetAssetPath(outputFolder);
+            bool hasInstances = sceneInstances.Count > 0;
+            bool validOutput = AssetDatabase.IsValidFolder(outputPath) && ToolPaths.Contains("Assets", outputPath);
+            ToolUi.BeginCard("3) 选择加工内容");
+            EditorGUILayout.LabelField("每个按钮都会先生成预览，确认后才修改实例。", EditorStyles.wordWrappedMiniLabel);
+            if (!hasInstances)
+                EditorGUILayout.HelpBox("请先添加至少一个 Hierarchy 中的预制体根实例。", MessageType.None);
+            else if (!validOutput)
+                EditorGUILayout.HelpBox("资源复制需要 Assets 内的有效输出目录。", MessageType.Warning);
+
+            using (new EditorGUI.DisabledScope(!hasInstances || !validOutput))
+            {
+                DrawSceneOperationRow("材质", CopyMaterialsFromMeshRender, "粒子材质", CopyMaterialsFromParticle);
+                DrawSceneOperationRow("粒子网格", CopyMeshFromParticle, "Image / Text", go => CopyImageAndTextResources(go));
+                DrawSceneOperationRow("MeshFilter 网格", CopyMeshFromMeshFilter, "动画 / Timeline", CopyAnimationAndTimeline);
+            }
+            ToolUi.EndCard();
+
+            ToolUi.BeginCard("4) 保存加工后的副本");
+            using (new EditorGUI.DisabledScope(!hasInstances))
+                if (GUILayout.Button(sceneInstances.Count > 1 ? $"预览保存所选副本（{sceneInstances.Count} 个）" : "预览保存副本", GUILayout.Height(30)))
+                    ToolWorkflow.Preview(BuildSceneSavePlan, SceneWorkflowOwner);
+            EditorGUILayout.LabelField("仅支持保存本窗口中由完整复制生成并放入场景的根副本；场景修改可用 Ctrl+Z 撤销。", EditorStyles.wordWrappedMiniLabel);
+            ToolUi.EndCard();
+        }
+
+        private void DrawCopyOutputSettings(string title)
+        {
+            ToolUi.BeginCard(title);
+            outputFolder = (DefaultAsset)EditorGUILayout.ObjectField("输出目录", outputFolder, typeof(DefaultAsset), false);
+            string exclusionTitle = excludeFolders.Count == 0 ? "排除目录（可选）" : $"排除目录 · {excludeFolders.Count} 个";
+            showExcludeFolders = EditorGUILayout.Foldout(showExcludeFolders, exclusionTitle, true);
+            if (showExcludeFolders)
+            {
+                EditorGUILayout.LabelField("这些目录中的资源继续引用原文件，不会复制。", EditorStyles.wordWrappedMiniLabel);
+                for (int i = 0; i < excludeFolders.Count; i++)
+                    using (new EditorGUILayout.HorizontalScope())
+                    {
+                        excludeFolders[i] = (DefaultAsset)EditorGUILayout.ObjectField(excludeFolders[i], typeof(DefaultAsset), false);
+                        if (GUILayout.Button("移除", GUILayout.Width(50))) excludeFolders.RemoveAt(i--);
+                    }
+                if (GUILayout.Button("添加排除目录")) excludeFolders.Add(null);
+            }
+            ToolUi.EndCard();
+        }
+
+        private void DrawSceneOperationRow(string leftTitle, System.Action<GameObject> leftAction, string rightTitle, System.Action<GameObject> rightAction)
+        {
+            using (new EditorGUILayout.HorizontalScope())
+            {
+                if (GUILayout.Button("预览复制" + leftTitle, GUILayout.Height(28))) PrepareCopyStep(leftTitle, leftAction);
+                if (GUILayout.Button("预览复制" + rightTitle, GUILayout.Height(28))) PrepareCopyStep(rightTitle, rightAction);
+            }
         }
 
         /// <summary>

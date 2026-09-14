@@ -52,7 +52,7 @@ namespace ToolSet
             var overview = new CopyOverview { sourceName = roots.Length == 1 ? roots[0].name : $"{roots.Length} 个预制体",
                 sourcePath = roots.Length == 1 ? sourcePaths[0] : null, outputFolder = folder, fullCopy = true,
                 description = roots.Length > 1 ? "每个预制体各生成一个副本；本批次共用的资源只复制一份，副本之间继续共用。" : null };
-            var plan = new ToolPlan { title = roots.Length == 1 ? "复制预制体" : $"批量复制 {roots.Length} 个预制体", owner = nameof(PrefabCopyTool), overview = overview };
+            var plan = new ToolPlan { title = roots.Length == 1 ? "复制预制体" : $"批量复制 {roots.Length} 个预制体", owner = PrefabCopyTool.CompleteWorkflowOwner, overview = overview };
             var particleMaterials = new HashSet<string>(roots.SelectMany(source => source.GetComponentsInChildren<ParticleSystemRenderer>(true)).SelectMany(r => r.sharedMaterials.Concat(new[] { r.trailMaterial })).Where(m => m != null).Select(AssetDatabase.GetAssetPath), StringComparer.OrdinalIgnoreCase);
             var allocator = new CopyPathAllocator();
             var copies = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -171,18 +171,23 @@ namespace ToolSet
 
     public partial class PrefabCopyTool
     {
+        internal const string CompleteWorkflowOwner = nameof(PrefabCopyTool) + ".Complete";
+        internal const string SceneWorkflowOwner = nameof(PrefabCopyTool) + ".Scene";
         readonly CopyPathAllocator copyPaths = new CopyPathAllocator();
         readonly HashSet<string> copiedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         List<GameObject> sourcePrefabs = new List<GameObject>();
         readonly HashSet<string> rootCopyPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         ToolFileTransaction activeTransaction;
         bool showAdvanced;
+        bool showExcludeFolders;
         int sourcePage;
         string sourceNotice;
         bool sourceNoticeWarning;
-        string CopyInputSignature() => string.Join(",", sourcePrefabs.Select(p => p == null ? "<missing>" : p.GetInstanceID().ToString())) + "|" +
-            string.Join(",", sceneInstances.Select(p => p == null ? "<missing>" : p.GetInstanceID().ToString())) + "|" +
-            AssetDatabase.GetAssetPath(outputFolder) + "|" + string.Join("|", excludeFolders.Select(f => f == null ? "" : AssetDatabase.GetAssetPath(f)));
+        public override string WorkflowOwner => showAdvanced ? SceneWorkflowOwner : CompleteWorkflowOwner;
+        string OutputInputSignature() => AssetDatabase.GetAssetPath(outputFolder) + "|" +
+            string.Join("|", excludeFolders.Select(f => f == null ? "" : AssetDatabase.GetAssetPath(f)));
+        string CompleteCopyInputSignature() => string.Join(",", sourcePrefabs.Select(p => p == null ? "<missing>" : p.GetInstanceID().ToString())) + "|" + OutputInputSignature();
+        string SceneCopyInputSignature() => string.Join(",", sceneInstances.Select(p => p == null ? "<missing>" : p.GetInstanceID().ToString())) + "|" + OutputInputSignature();
 
         internal void MigrateLegacyCopyInput()
         {
@@ -209,15 +214,15 @@ namespace ToolSet
             if (added > 0)
             {
                 sourcePage = (sourcePrefabs.Count - 1) / 6;
-                ToolWorkflow.DiscardPreparedPlan(nameof(PrefabCopyTool));
+                ToolWorkflow.DiscardPreparedPlan(CompleteWorkflowOwner);
             }
         }
 
-        void DrawSourcePrefabs()
+        void DrawSourcePrefabs(string title = "源预制体")
         {
             using (new EditorGUILayout.VerticalScope(EditorStyles.helpBox))
             {
-                EditorGUILayout.LabelField($"源预制体 · {sourcePrefabs.Count} 个", EditorStyles.boldLabel);
+                EditorGUILayout.LabelField($"{title} · {sourcePrefabs.Count} 个", EditorStyles.boldLabel);
                 var drop = GUILayoutUtility.GetRect(0, 42, GUILayout.ExpandWidth(true));
                 GUI.Box(drop, "将 Project 中的一个或多个预制体拖到这里", EditorStyles.helpBox);
                 var evt = Event.current;
@@ -254,7 +259,7 @@ namespace ToolSet
 
         internal ToolPlan PrepareCompleteCopy()
         {
-            string input = CopyInputSignature();
+            string input = CompleteCopyInputSignature();
             var plan = PrefabCopyPlan.Build(sourcePrefabs, outputFolder, excludeFolders, paths =>
             {
                 foreach (string path in paths) rootCopyPaths.Add(path);
@@ -262,7 +267,7 @@ namespace ToolSet
                 EditorGUIUtility.PingObject(AssetDatabase.LoadAssetAtPath<GameObject>(paths[0]));
             });
             plan.overview.placeInScene = PlaceCopiesInScene;
-            plan.validate = () => CopyInputSignature() != input ? "复制设置已更改，请重新整理复制清单。" : null;
+            plan.validate = () => CompleteCopyInputSignature() != input ? "复制设置已更改，请重新整理复制清单。" : null;
             return plan;
         }
 
@@ -297,11 +302,12 @@ namespace ToolSet
             catch { Undo.RevertAllDownToGroup(group); throw; }
             SelectCurrentInstance(instances[0]);
             sceneInstances.Clear(); sceneInstances.AddRange(instances);
+            ToolWorkflow.ClearPage(SceneWorkflowOwner, "副本已放入场景，请选择需要加工的资源类型。");
+            showAdvanced = true;
             Selection.objects = instances.Cast<Object>().ToArray();
-            ToolWorkflow.DiscardPreparedPlan(nameof(PrefabCopyTool));
         }
 
         void PrepareCopyStep(string title, Action<GameObject> execute)
-            => ToolWorkflow.Preview(() => BuildSceneCopyPlan(title, execute), nameof(PrefabCopyTool));
+            => ToolWorkflow.Preview(() => BuildSceneCopyPlan(title, execute), SceneWorkflowOwner);
     }
 }

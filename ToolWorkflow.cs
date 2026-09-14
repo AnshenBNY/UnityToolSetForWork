@@ -12,6 +12,7 @@ namespace ToolSet
     public abstract class ToolPanel : IToolGUI
     {
         public abstract void DrawGUI();
+        public virtual string WorkflowOwner => GetType().Name;
         public virtual void Invalidate() { }
     }
 
@@ -399,6 +400,17 @@ namespace ToolSet
             Status = state.status;
             Changed?.Invoke();
         }
+        public static void ClearPage(string owner, string status)
+        {
+            if (Running) return;
+            var state = Page(owner);
+            if (ReferenceEquals(Plan, state.plan)) Plan = null;
+            state.plan = null;
+            state.buildFailed = false;
+            state.status = status;
+            Status = status;
+            Changed?.Invoke();
+        }
         public static void DrawSummary(string owner)
         {
             var plan = Page(owner).plan;
@@ -497,7 +509,7 @@ namespace ToolSet
                 DrawCopyActions(owner, state);
                 return;
             }
-            if (owner == nameof(PrefabCopyTool) && !Running)
+            if (owner.StartsWith(nameof(PrefabCopyTool), StringComparison.Ordinal) && !Running)
             {
                 if (plan == null && state.status != "选择对象 → 生成预览 → 执行 → 查看结果")
                     EditorGUILayout.HelpBox(state.status, state.buildFailed ? MessageType.Error : MessageType.Info);
