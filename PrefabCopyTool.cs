@@ -240,11 +240,13 @@ namespace ToolSet
 
         private void DrawSceneOperationRow(string leftTitle, System.Action<GameObject> leftAction, string rightTitle, System.Action<GameObject> rightAction)
         {
-            using (new EditorGUILayout.HorizontalScope())
-            {
-                if (GUILayout.Button("预览复制" + leftTitle, GUILayout.Height(28))) PrepareCopyStep(leftTitle, leftAction);
-                if (GUILayout.Button("预览复制" + rightTitle, GUILayout.Height(28))) PrepareCopyStep(rightTitle, rightAction);
-            }
+            Rect row = EditorGUILayout.GetControlRect(false, 28);
+            const float spacing = 6;
+            float buttonWidth = (row.width - spacing) * 0.5f;
+            var leftRect = new Rect(row.x, row.y, buttonWidth, row.height);
+            var rightRect = new Rect(leftRect.xMax + spacing, row.y, buttonWidth, row.height);
+            if (GUI.Button(leftRect, "预览复制" + leftTitle)) PrepareCopyStep(leftTitle, leftAction);
+            if (GUI.Button(rightRect, "预览复制" + rightTitle)) PrepareCopyStep(rightTitle, rightAction);
         }
 
         /// <summary>
