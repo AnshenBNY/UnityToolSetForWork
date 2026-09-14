@@ -70,8 +70,9 @@ namespace ToolSet
                         var existing = parent.Cast<Transform>().Where(t => t.name == node.name).ToArray();
                         if (existing.Length == 1) continue;
                         if (existing.Length > 1) throw new InvalidOperationException("目标同名节点不唯一：" + parentPath + "/" + node.name);
-                        var asset = PrefabUtility.GetCorrespondingObjectFromSource(node.gameObject);
-                        if (asset == null) throw new InvalidOperationException("预制体来源不可用：" + node.name);
+                        string assetPath = PrefabUtility.GetPrefabAssetPathOfNearestInstanceRoot(node.gameObject);
+                        var asset = AssetDatabase.LoadAssetAtPath<GameObject>(assetPath);
+                        if (asset == null) throw new InvalidOperationException("嵌套预制体来源不可用：" + node.name);
                         if (PrefabUtility.GetAddedGameObjects(node.gameObject).Count > 0 || PrefabUtility.GetAddedComponents(node.gameObject).Count > 0 || PrefabUtility.GetRemovedComponents(node.gameObject).Count > 0 || PrefabUtility.GetRemovedGameObjects(node.gameObject).Count > 0)
                             throw new InvalidOperationException(node.name + " 包含添加/删除节点或组件的覆盖，请先保存为独立预制体再映射。");
                         var modifications = PrefabUtility.GetPropertyModifications(node.gameObject);
