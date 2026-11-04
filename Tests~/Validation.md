@@ -1,5 +1,15 @@
 # 工具改造验证记录
 
+## 2026-10-13
+
+- Unity 2022.3.14f1，使用 `Tests~/Run.ps1` 创建独立工程，`DependencyRecordRegression`：**10 项通过，0 失败**。
+- 验证修复后状态与统计刷新、重新解析同一 JSON、JSON 中断链中的引用文件、引用来源与候选移动、备份恢复及候选删除后的重新报错。
+- 验证导入器 .meta 引用、引用换行/字段顺序/可选 type/大小写 GUID、普通 GUID 文本保持、同名不同扩展名候选筛选、检查结果变化后旧计划失效。
+- 验证旧版已修复条目的实际依赖证据，无使用关系的同名候选、残留旧引用及无效 fileID 不会被标为已修复；无法识别的子资源继续阻止执行。
+- 验证部分修复仍保留丢失状态、JSON 范围外根对象保持，以及共用修复模块的复制 GUID/fileID 与真正空引用。
+- 全部编辑器源码与回归测试程序集编译通过，`git diff --check` 通过。完整回归未运行，当前工程缺少 `fish_200004005_skin.fbx` 夹具；本次未做 Unity 窗口人工验收。
+- 专项结果：`C:/Users/iveco/AppData/Local/Temp/ToolSetRegression-4ed302084f8a4b739e92affbb44824f8/dependency-record-regression-results.txt`。
+
 ## 2026-09-14
 
 - `SceneSaveRegression`：通过。场景实例不区分来源，修改直接保存到当前连接的预制体；输出目录可以为空，同一目标的多个实例会阻止冲突保存。

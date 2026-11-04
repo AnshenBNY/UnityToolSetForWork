@@ -56,6 +56,7 @@ namespace ToolSet
         public List<string> referencedByRoots;
         public List<string> candidatePaths = new();
         public bool candidateSearchCompleted;
+        public bool repaired;
     }
 
     internal sealed class DependencyCheckReport
@@ -67,6 +68,25 @@ namespace ToolSet
         public int builtInCount;
         public List<DependencyCheckItem> items = new();
         public List<string> rootPaths = new();
+        public DependencyRecordFile record;
+        public string repairHistoryPath;
+        public DependencyRepairHistory repairHistory;
+        public readonly Dictionary<string, HashSet<string>> referenceGuids = new(StringComparer.OrdinalIgnoreCase);
+        public readonly HashSet<string> nonTextOwners = new(StringComparer.OrdinalIgnoreCase);
+    }
+
+    [Serializable]
+    internal sealed class DependencyRepairHistory
+    {
+        public List<DependencyRepairEntry> entries = new();
+    }
+
+    [Serializable]
+    internal sealed class DependencyRepairEntry
+    {
+        public string oldGuid;
+        public string replacementGuid;
+        public List<AssetRecordItem> owners = new();
     }
 
     [Serializable]
@@ -117,7 +137,6 @@ namespace ToolSet
         private bool parseFoldout = true;
         private bool repairOnlyJsonScope = true;
         private bool repairExpandRootDependencies = true;
-        private readonly Dictionary<string, List<string>> rootDependencyScopeCache = new(StringComparer.OrdinalIgnoreCase);
         private GUIStyle largeHintStyle;
         private GUIStyle sectionTitleStyle;
         private static readonly HashSet<string> RepairSupportedExtensions = new(StringComparer.OrdinalIgnoreCase)
@@ -378,7 +397,7 @@ namespace ToolSet
         {
             string stateText = item.state switch
             {
-                DependencyState.Present => "已找到",
+                DependencyState.Present => item.repaired ? "已修复" : "已找到",
                 DependencyState.Missing => "引用丢失",
                 _ => "内建资源"
             };
@@ -410,6 +429,7 @@ namespace ToolSet
             if (item.state == DependencyState.Present)
             {
                 DrawInfoRow("当前路径", item.currentPath);
+                if (item.repaired) DrawInfoRow("说明", item.note);
                 if (item.isDirectoryChanged)
                 {
                     DrawInfoRow("提示", "引用已找到，但目录与记录不一致。");
@@ -939,8 +959,9 @@ namespace ToolSet
             }
 
             lastReport = BuildCheckReport(data, sourceName);
-            rootDependencyScopeCache.Clear();
+            resultPage = 0;
             statusMessage = $"检查完成：丢失 {lastReport.missingCount} / {lastReport.totalCount}";
+            Changed?.Invoke();
         }
 
         private string GetRecordJsonContent(out string sourceName)
@@ -963,6 +984,7 @@ namespace ToolSet
 
         private static DependencyCheckReport BuildCheckReport(DependencyRecordFile data, string sourceFileName)
         {
+            ToolAssetCache.Clear();
             var movedRoots = (data.roots ?? new List<AssetRecordItem>()).Where(r => r != null && !string.IsNullOrEmpty(r.path))
                 .GroupBy(r => r.path, StringComparer.OrdinalIgnoreCase)
                 .ToDictionary(g => g.Key, g => {
@@ -971,15 +993,20 @@ namespace ToolSet
                 }, StringComparer.OrdinalIgnoreCase);
             DependencyCheckReport report = new()
             {
+                record = data,
+                repairHistoryPath = "Library/ToolSetDependencyRepairs/" + Hash128.Compute(JsonUtility.ToJson(data)) + ".json",
                 sourceFileName = sourceFileName,
                 rootPaths = data.roots == null
                     ? new List<string>()
                     : data.roots
-                        .Where(r => !string.IsNullOrEmpty(r.path))
+                        .Where(r => r != null && !string.IsNullOrEmpty(r.path))
                         .Select(r => movedRoots.TryGetValue(r.path, out var current) ? current : r.path)
                         .Distinct(StringComparer.OrdinalIgnoreCase)
                         .ToList()
             };
+            report.repairHistory = File.Exists(report.repairHistoryPath)
+                ? JsonUtility.FromJson<DependencyRepairHistory>(File.ReadAllText(report.repairHistoryPath)) ?? new DependencyRepairHistory()
+                : new DependencyRepairHistory();
 
             foreach (DependencyRecordItem dep in data.dependencies.Where(d => d != null))
             {
@@ -990,7 +1017,8 @@ namespace ToolSet
                     guid = dep.guid,
                     note = string.Empty,
                     isDirectoryChanged = false,
-                    referencedByRoots = (dep.referencedByRoots ?? new List<string>()).Select(p => movedRoots.TryGetValue(p, out var current) ? current : p).ToList()
+                    referencedByRoots = (dep.referencedByRoots ?? new List<string>()).Where(p => !string.IsNullOrWhiteSpace(p))
+                        .Select(p => movedRoots.TryGetValue(p, out var current) ? current : p).ToList()
                 };
 
                 if (dep.isBuiltIn)
@@ -1010,6 +1038,15 @@ namespace ToolSet
                 report.items.Add(item);
             }
 
+            foreach (var item in report.items.Where(i => i.state == DependencyState.Missing))
+                VerifyRepair(report, item);
+
+            RecountReport(report);
+            return report;
+        }
+
+        private static void RecountReport(DependencyCheckReport report)
+        {
             report.items = report.items
                 .OrderByDescending(i => i.state == DependencyState.Missing)
                 .ThenBy(i => i.fileName, StringComparer.OrdinalIgnoreCase)
@@ -1019,7 +1056,87 @@ namespace ToolSet
             report.presentCount = report.items.Count(i => i.state == DependencyState.Present);
             report.missingCount = report.items.Count(i => i.state == DependencyState.Missing);
             report.builtInCount = report.items.Count(i => i.state == DependencyState.BuiltIn);
-            return report;
+        }
+
+        private static void VerifyRepair(DependencyCheckReport report, DependencyCheckItem item)
+        {
+            var repair = report.repairHistory.entries.FirstOrDefault(e => string.Equals(e.oldGuid, item.guid, StringComparison.OrdinalIgnoreCase));
+            if (repair == null)
+            {
+                VerifyExistingReplacement(report, item);
+                return;
+            }
+            string replacement = AssetDatabase.GUIDToAssetPath(repair.replacementGuid);
+            if (string.IsNullOrEmpty(replacement) || AssetDatabase.LoadMainAssetAtPath(replacement) == null)
+            {
+                item.note = "曾修复此项，但候选资源已丢失。";
+                return;
+            }
+            var scope = CollectRecordedRepairScope(report, item, true, true);
+            var ownerPaths = repair.owners.Select(o => ResolveRecordedOwner(o.path, o.guid)).ToList();
+            scope.UnionWith(ownerPaths);
+            if (scope.Any(p => GetReferenceGuids(report, p).Contains(item.guid ?? "")))
+            {
+                item.note = "曾修复此项，但复查仍发现旧 GUID 引用，需要继续修复。";
+                return;
+            }
+            if (ownerPaths.Count == 0 || ownerPaths.Any(p => !File.Exists(p) || !GetReferenceGuids(report, p).Contains(repair.replacementGuid)))
+            {
+                item.note = "修复记录与当前文件不一致，请重新检查引用来源。";
+                return;
+            }
+            if (!ReferenceRepair.ValidateReferenceIds(ownerPaths, repair.replacementGuid, replacement))
+            {
+                item.note = "候选资源存在，但引用的 fileID 已失效，需要重新指定子资源。";
+                return;
+            }
+            item.state = DependencyState.Present;
+            item.repaired = true;
+            item.currentPath = replacement;
+            item.isDirectoryChanged = !IsSameDirectory(item.originalPath, replacement);
+            item.note = "已验证引用替换为 " + replacement + "（保留原 JSON 的 GUID 基线）";
+            item.candidatePaths.Clear();
+        }
+
+        private static HashSet<string> GetReferenceGuids(DependencyCheckReport report, string path)
+        {
+            if (report.referenceGuids.TryGetValue(path, out var cached)) return cached;
+            var guids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (File.Exists(path))
+            {
+                string content = File.ReadAllText(path);
+                if (ReferenceRepair.IsUnityText(path, content))
+                    foreach (System.Text.RegularExpressions.Match match in ReferenceRepair.Reference.Matches(content))
+                        guids.Add(match.Groups["guid"].Value);
+                else report.nonTextOwners.Add(path);
+            }
+            report.referenceGuids[path] = guids;
+            return guids;
+        }
+
+        private static void VerifyExistingReplacement(DependencyCheckReport report, DependencyCheckItem item)
+        {
+            // Earlier versions did not retain repair evidence. Require a unique, actually referenced
+            // same-name replacement in the current root graph, plus absence of the old object reference.
+            // A name-search hit alone never proves repair.
+            if (string.IsNullOrEmpty(item.guid) || string.IsNullOrEmpty(item.fileName)) return;
+            var roots = item.referencedByRoots.Count > 0 ? item.referencedByRoots : report.rootPaths;
+            if (roots.Count == 0 || roots.Any(r => AssetDatabase.LoadMainAssetAtPath(r) == null)) return;
+            var scope = CollectRecordedRepairScope(report, item, true, true);
+            if (scope.Any(p => GetReferenceGuids(report, p).Contains(item.guid))) return;
+            var currentGuids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var path in scope) currentGuids.UnionWith(GetReferenceGuids(report, path));
+            if (scope.Any(p => report.nonTextOwners.Contains(p))) return;
+            var candidates = roots.SelectMany(r => ToolAssetCache.Dependencies(r, true)).Distinct(StringComparer.OrdinalIgnoreCase)
+                .Where(p => string.Equals(Path.GetFileName(p), item.fileName, StringComparison.OrdinalIgnoreCase) &&
+                    currentGuids.Contains(AssetDatabase.AssetPathToGUID(p)) && AssetDatabase.LoadMainAssetAtPath(p) != null).ToList();
+            if (candidates.Count != 1) return;
+            if (!ReferenceRepair.ValidateReferenceIds(scope, AssetDatabase.AssetPathToGUID(candidates[0]), candidates[0])) return;
+            item.state = DependencyState.Present;
+            item.repaired = true;
+            item.currentPath = candidates[0];
+            item.isDirectoryChanged = !IsSameDirectory(item.originalPath, item.currentPath);
+            item.note = "当前依赖链已引用同名资源，且扫描范围内没有旧 GUID 对象引用：" + item.currentPath;
         }
 
         private static string FindAssetPathStrictByGuid(DependencyRecordItem dep, out string note)
@@ -1228,26 +1345,74 @@ namespace ToolSet
 
         private void TryRepairMissingReference(DependencyCheckItem item, string candidatePath)
         {
-            ToolWorkflow.Preview(() =>
+            DependencyCheckReport report = lastReport;
+            ToolWorkflow.Preview(() => BuildMissingReferenceRepair(report, item, candidatePath));
+        }
+
+        internal ToolPlan BuildMissingReferenceRepair(DependencyCheckReport report, DependencyCheckItem item, string candidatePath)
+        {
+            if (report == null || lastReport != report || item.state != DependencyState.Missing)
+                throw new InvalidOperationException("检查结果已变化，请重新检查后修复。");
+            bool onlyJsonScope = repairOnlyJsonScope, expandDependencies = repairExpandRootDependencies;
+            ToolAssetCache.Clear();
+            var scope = CollectRepairTargetAssetPaths(item);
+            var plan = ReferenceRepair.Build("修复缺失引用", item.guid, item.originalPath, candidatePath, scope);
+            var repair = new DependencyRepairEntry
             {
-                rootDependencyScopeCache.Clear();
-                var plan = ReferenceRepair.Build("修复缺失引用", item.guid, item.originalPath, candidatePath, CollectRepairTargetAssetPaths(item));
-                plan.completed = () =>
-                {
-                    rootDependencyScopeCache.Clear();
-                    // The saved record still refers to the old GUID: retain its identity for subsequent audits.
-                    item.note = "已将预览内的引用替换为 " + candidatePath + "；请重新导出记录以更新依赖基线";
-                    item.candidatePaths.Clear();
-                    statusMessage = item.note;
-                };
-                return plan;
-            });
+                oldGuid = item.guid,
+                replacementGuid = AssetDatabase.AssetPathToGUID(candidatePath),
+                owners = scope.Where(p => plan.fingerprints.ContainsKey(p) && ReferenceRepair.ReferencesGuid(p, item.guid))
+                    .Select(p => new AssetRecordItem { path = p, guid = AssetDatabase.AssetPathToGUID(
+                        p.EndsWith(".meta", StringComparison.OrdinalIgnoreCase) ? p.Substring(0, p.Length - 5) : p) }).ToList()
+            };
+            plan.validate = () => lastReport == report && onlyJsonScope == repairOnlyJsonScope && expandDependencies == repairExpandRootDependencies
+                ? null : "记录、检查结果或修复范围已变化，请重新预览修复。";
+            plan.completed = () =>
+            {
+                ToolAssetCache.Clear();
+                // Keep evidence separate from the source JSON and revalidate it on every audit.
+                var previous = report.repairHistory.entries.FirstOrDefault(e => e.oldGuid.Equals(item.guid, StringComparison.OrdinalIgnoreCase));
+                if (previous != null)
+                    repair.owners.AddRange(previous.owners.Where(o => !repair.owners.Any(n => n.guid == o.guid && n.path == o.path)));
+                report.repairHistory.entries.RemoveAll(e => e.oldGuid.Equals(item.guid, StringComparison.OrdinalIgnoreCase));
+                report.repairHistory.entries.Add(repair);
+                Directory.CreateDirectory(Path.GetDirectoryName(report.repairHistoryPath));
+                File.WriteAllText(report.repairHistoryPath, JsonUtility.ToJson(report.repairHistory, true), new UTF8Encoding(false));
+                report.referenceGuids.Clear();
+                report.nonTextOwners.Clear();
+                VerifyRepair(report, item);
+                RecountReport(report);
+                statusMessage = item.repaired ? $"修复完成并已复查：剩余丢失 {report.missingCount} 项" : item.note;
+                Changed?.Invoke();
+            };
+            return plan;
         }
 
         private List<string> CollectRepairTargetAssetPaths(DependencyCheckItem item)
         {
+            var targetPaths = CollectRecordedRepairScope(lastReport, item, repairOnlyJsonScope, repairExpandRootDependencies);
+            if (!repairOnlyJsonScope)
+                targetPaths.UnionWith(FindAssetPathsContainingGuid(item.guid));
+            return targetPaths.OrderBy(p => p, StringComparer.OrdinalIgnoreCase).ToList();
+        }
+
+        private static string ResolveRecordedOwner(string path, string guid)
+        {
+            bool meta = path != null && path.EndsWith(".meta", StringComparison.OrdinalIgnoreCase);
+            string current = string.IsNullOrEmpty(guid) ? null : AssetDatabase.GUIDToAssetPath(guid);
+            return string.IsNullOrEmpty(current) ? NormalizePath(path) : current + (meta ? ".meta" : "");
+        }
+
+        private static HashSet<string> CollectRecordedRepairScope(DependencyCheckReport report, DependencyCheckItem item, bool onlyJsonScope, bool expandDependencies)
+        {
             HashSet<string> targetPaths = new(StringComparer.OrdinalIgnoreCase);
             List<string> scopeRoots = new();
+            void AddOwner(string path)
+            {
+                if (string.IsNullOrWhiteSpace(path) || !ToolPaths.Contains("Assets", path)) return;
+                if (IsSupportedRepairFile(path)) targetPaths.Add(path);
+                if (!path.EndsWith(".meta", StringComparison.OrdinalIgnoreCase) && File.Exists(path + ".meta")) targetPaths.Add(path + ".meta");
+            }
 
             if (item.referencedByRoots != null)
             {
@@ -1255,68 +1420,50 @@ namespace ToolSet
                 {
                     if (!string.IsNullOrWhiteSpace(rootPath))
                     {
-                        targetPaths.Add(rootPath);
+                        AddOwner(rootPath);
                         scopeRoots.Add(rootPath);
                     }
                 }
             }
 
-            if (lastReport?.rootPaths != null && !repairOnlyJsonScope)
+            // Old records may omit referencedByRoots. Use their explicit root set in that case.
+            if (report?.rootPaths != null && (!onlyJsonScope || scopeRoots.Count == 0))
             {
-                foreach (string rootPath in lastReport.rootPaths)
+                foreach (string rootPath in report.rootPaths)
                 {
                     if (!string.IsNullOrWhiteSpace(rootPath))
                     {
-                        targetPaths.Add(rootPath);
+                        AddOwner(rootPath);
                         scopeRoots.Add(rootPath);
                     }
                 }
             }
 
-            if (repairExpandRootDependencies)
+            // Broken dependency edges disappear from GetDependencies. The JSON retains those owners.
+            var itemsByPath = report.items.Where(i => !string.IsNullOrEmpty(i.originalPath))
+                .GroupBy(i => i.originalPath, StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
+            if (report?.record?.dependencies != null)
+                foreach (var dependency in report.record.dependencies.Where(d => d != null && !d.isBuiltIn))
+                {
+                    itemsByPath.TryGetValue(dependency.path ?? "", out var checkedItem);
+                    bool related = !onlyJsonScope || checkedItem?.referencedByRoots?.Any(r => scopeRoots.Contains(r, StringComparer.OrdinalIgnoreCase)) == true;
+                    if (related && (expandDependencies || scopeRoots.Contains(ResolveRecordedOwner(dependency.path, dependency.guid), StringComparer.OrdinalIgnoreCase)))
+                        AddOwner(ResolveRecordedOwner(dependency.path, dependency.guid));
+                }
+
+            if (expandDependencies)
             {
                 foreach (string rootPath in scopeRoots.Distinct(StringComparer.OrdinalIgnoreCase))
                 {
-                    foreach (string depPath in GetCachedDependenciesForRoot(rootPath))
+                    foreach (string depPath in ToolAssetCache.Dependencies(rootPath, true))
                     {
-                        if (IsSupportedRepairFile(depPath))
-                        {
-                            targetPaths.Add(depPath);
-                        }
+                        AddOwner(depPath);
                     }
                 }
             }
 
-            if (!repairOnlyJsonScope)
-            {
-                foreach (string foundPath in FindAssetPathsContainingGuid(item.guid))
-                {
-                    targetPaths.Add(foundPath);
-                }
-            }
-
-            return targetPaths.ToList();
-        }
-
-        private List<string> GetCachedDependenciesForRoot(string rootPath)
-        {
-            if (string.IsNullOrWhiteSpace(rootPath))
-            {
-                return new List<string>();
-            }
-
-            if (rootDependencyScopeCache.TryGetValue(rootPath, out List<string> cached))
-            {
-                return cached;
-            }
-
-            string[] dependencies = ToolAssetCache.Dependencies(rootPath, true);
-            List<string> list = dependencies
-                .Where(IsSupportedRepairFile)
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .ToList();
-            rootDependencyScopeCache[rootPath] = list;
-            return list;
+            return targetPaths;
         }
 
         private static IEnumerable<string> FindAssetPathsContainingGuid(string guid)
@@ -1336,7 +1483,7 @@ namespace ToolSet
             {
                 if (EditorUtility.DisplayCancelableProgressBar("查找引用文件", absolutePath, 0.5f)) throw new OperationCanceledException();
                 string extension = Path.GetExtension(absolutePath);
-                if (!RepairSupportedExtensions.Contains(extension))
+                if (!RepairSupportedExtensions.Contains(extension) && !extension.Equals(".meta", StringComparison.OrdinalIgnoreCase))
                 {
                     continue;
                 }
@@ -1351,7 +1498,7 @@ namespace ToolSet
                     continue;
                 }
 
-                if (!content.Contains(guid))
+                if (content.IndexOf(guid, StringComparison.OrdinalIgnoreCase) < 0)
                 {
                     continue;
                 }
@@ -1372,7 +1519,7 @@ namespace ToolSet
             }
 
             string extension = Path.GetExtension(assetPath);
-            return RepairSupportedExtensions.Contains(extension);
+            return RepairSupportedExtensions.Contains(extension) || extension.Equals(".meta", StringComparison.OrdinalIgnoreCase);
         }
 
         private static string ToAbsolutePath(string assetPath)
