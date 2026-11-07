@@ -16,6 +16,12 @@ namespace ToolSet
         public bool Renamed => !Shared && Path.GetFileNameWithoutExtension(destination) != Path.GetFileNameWithoutExtension(source) + "_Copy";
     }
 
+    internal sealed class CopyReferenceWarning
+    {
+        public string copiedAsset, originalAsset, expectedAsset, detail;
+        public string LogMessage => detail + "；引用方：" + copiedAsset + "；原资源：" + originalAsset + "；对应副本：" + expectedAsset;
+    }
+
     // The artist-facing list describes resources once; execution may need several steps per file.
     internal sealed class CopyOverview
     {
@@ -25,15 +31,26 @@ namespace ToolSet
         public readonly List<CopyResource> resources = new List<CopyResource>();
         public readonly List<CopyResource> roots = new List<CopyResource>();
         public readonly List<GameObject> sceneTargets = new List<GameObject>();
+        public readonly List<CopyReferenceWarning> referenceWarnings = new List<CopyReferenceWarning>();
         public Action<string[]> placeInScene;
         public string[] ResultPaths => roots.Count > 0 ? roots.Select(r => r.destination).ToArray() :
             (string.IsNullOrEmpty(resultPath) ? Array.Empty<string>() : new[] { resultPath });
         public int CopyCount => resources.Count(r => !r.Shared);
         public int SharedCount => resources.Count(r => r.Shared);
         public string ReadyMessage => fullCopy ? $"将生成 {roots.Count} 个预制体副本 · 复制 {CopyCount} 个资源，沿用 {SharedCount} 个现有资源" : "内容已整理，点击下方「" + actionLabel + "」继续";
-        public string SuccessMessage => fullCopy ? $"复制完成：{roots.Count} 个预制体副本，共保存 {CopyCount} 个资源" : actionLabel.Replace("开始", "") + "完成";
+        public string SuccessMessage => (fullCopy ? $"复制完成：{roots.Count} 个预制体副本，共保存 {CopyCount} 个资源" : actionLabel.Replace("开始", "") + "完成") +
+            (referenceWarnings.Count > 0 ? $" · 仍有 {referenceWarnings.Count} 处原资源引用，副本已保留" : "");
+
+        public void AddReferenceWarning(string copiedAsset, string originalAsset, string expectedAsset, string detail)
+        {
+            if (referenceWarnings.Any(w => string.Equals(w.copiedAsset, copiedAsset, StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(w.originalAsset, originalAsset, StringComparison.OrdinalIgnoreCase))) return;
+            referenceWarnings.Add(new CopyReferenceWarning { copiedAsset = copiedAsset, originalAsset = originalAsset, expectedAsset = expectedAsset, detail = detail });
+        }
 
         bool showFiles, showShared, showTechnical;
+        bool showReferenceWarnings = true;
+        int referenceWarningPage;
         string search = "";
         int resourcePage, sharedPage, logPage, categoryIndex, rootPage, scenePage;
         string selectedSource;
@@ -112,6 +129,25 @@ namespace ToolSet
                     }
                 }
 
+                if (referenceWarnings.Count > 0)
+                {
+                    EditorGUILayout.HelpBox($"有 {referenceWarnings.Count} 处引用未切换到副本，仍使用原资源。" +
+                        (plan.phase == ToolPlanPhase.Succeeded ? "复制结果已保留；这些引用尚未独立，修改原资源仍会影响副本。" : "详情如下。"), MessageType.Warning);
+                    showReferenceWarnings = EditorGUILayout.Foldout(showReferenceWarnings, "仍引用原资源的明细", true);
+                    if (showReferenceWarnings)
+                    {
+                        ToolUi.DrawPager(ref referenceWarningPage, referenceWarnings.Count, 6);
+                        foreach (var warning in referenceWarnings.Skip(referenceWarningPage * 6).Take(6))
+                            using (new EditorGUILayout.VerticalScope(EditorStyles.helpBox))
+                            {
+                                GUILayout.Label(warning.detail, EditorStyles.wordWrappedLabel);
+                                EditorGUILayout.LabelField("引用方副本", EditorStyles.miniBoldLabel); DrawPath(warning.copiedAsset);
+                                EditorGUILayout.LabelField("当前仍引用", EditorStyles.miniBoldLabel); DrawPath(warning.originalAsset);
+                                EditorGUILayout.LabelField("对应资源副本", EditorStyles.miniBoldLabel); DrawPath(warning.expectedAsset);
+                            }
+                    }
+                }
+
                 foreach (string error in plan.blockingErrors.Take(5)) EditorGUILayout.HelpBox("阻断执行：" + error, MessageType.Error);
                 if (plan.blockingErrors.Count > 5) EditorGUILayout.LabelField($"另有 {plan.blockingErrors.Count - 5} 项阻断问题，详见操作记录。", EditorStyles.wordWrappedMiniLabel);
                 // Skipped problems are visible without requiring the artist to open the log.
@@ -122,7 +158,8 @@ namespace ToolSet
                 showTechnical = EditorGUILayout.Foldout(showTechnical, "操作记录", true);
                 if (showTechnical)
                 {
-                    string[] lines = plan.blockingErrors.Select(e => "[阻断] " + e).Concat(plan.errors.Select(e => "[问题] " + e)).Concat(plan.steps.Select(s => "[" + s.state + "] " + s.description)).ToArray();
+                    string[] lines = plan.blockingErrors.Select(e => "[阻断] " + e).Concat(plan.errors.Select(e => "[问题] " + e))
+                        .Concat(referenceWarnings.Select(w => "[引用警告] " + w.LogMessage)).Concat(plan.steps.Select(s => "[" + s.state + "] " + s.description)).ToArray();
                     ToolUi.DrawPager(ref logPage, lines.Length, 20);
                     logScroll = EditorGUILayout.BeginScrollView(logScroll, GUILayout.Height(120));
                     foreach (string line in lines.Skip(logPage * 20).Take(20)) EditorGUILayout.SelectableLabel(line, GUILayout.Height(18));

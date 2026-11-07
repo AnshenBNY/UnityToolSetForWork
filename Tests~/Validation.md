@@ -1,5 +1,13 @@
 # 工具改造验证记录
 
+## 2026-11-07
+
+- Unity 2022.3.62f3c1，使用 `Tests~/Run.ps1 -FocusedTestFile CopyReferenceWarningRegression.cs -ExecuteMethod CopyReferenceWarningRegression.Run -ResultFile copy-reference-warning-results.txt` 创建独立工程：**6 项通过，0 失败**。
+- 验证正常批量复制、导入后重新引用原贴图时保留整批结果及完成回调、粒子 Mesh 槽残留原模型时保留结果、排除资源不误报，以及出现警告后真正失败/取消仍回滚。
+- 验证完成状态显示残留引用数量、警告包含引用方/原资源/对应副本路径、重复检查不重复记录、成功后整批恢复可用，源文件及 .meta 保持不变。
+- 全部编辑器源码与回归测试程序集编译通过，`git diff --check` 通过。未重新执行用户的 7 个预制体复制任务，未做窗口布局人工验收。
+- 专项结果：`C:/Users/Administrator/AppData/Local/Temp/ToolSetRegression-3d093f40c76948a4af883c02c6208d3a/copy-reference-warning-results.txt`。
+
 ## 2026-10-13
 
 - Unity 2022.3.14f1，使用 `Tests~/Run.ps1` 创建独立工程，`DependencyRecordRegression`：**10 项通过，0 失败**。

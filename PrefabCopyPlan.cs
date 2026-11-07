@@ -131,8 +131,7 @@ namespace ToolSet
             overview.resultPath = rootCopies.Length == 1 ? rootCopies[0] : null;
             plan.Add("复查整批副本的旧资源引用", transaction =>
             {
-                var retained = copies.Values.SelectMany(p => AssetDatabase.GetDependencies(p, false)).Where(copies.ContainsKey).Distinct().ToArray();
-                if (retained.Length > 0) throw new IOException("副本仍依赖应被替换的旧资源：" + string.Join("、", retained));
+                ReportRetainedReferences(overview, copies);
             }, "正在检查整批资源引用");
             foreach (string rootCopy in rootCopies)
                 plan.Add("验证预制体副本 " + rootCopy, transaction =>
@@ -144,13 +143,25 @@ namespace ToolSet
                     foreach (var particle in loaded.GetComponentsInChildren<ParticleSystemRenderer>(true))
                     {
                         var meshes = new Mesh[particle.meshCount]; particle.GetMeshes(meshes);
-                        if (meshes.Any(m => m != null && copies.ContainsKey(AssetDatabase.GetAssetPath(m)))) throw new IOException("粒子 Mesh 槽仍引用旧模型：" + particle.name);
+                        foreach (string path in meshes.Where(m => m != null).Select(AssetDatabase.GetAssetPath).Distinct())
+                            if (copies.TryGetValue(path, out string expected))
+                                overview.AddReferenceWarning(rootCopy, path, expected, "粒子 Mesh 槽仍引用原模型：" + particle.name);
                     }
                 }
                 finally { if (loaded != null) PrefabUtility.UnloadPrefabContents(loaded); }
             }, "正在检查：" + Path.GetFileName(rootCopy));
             plan.completed = () => completed?.Invoke(rootCopies);
             return plan;
+        }
+        internal static void ReportRetainedReferences(CopyOverview overview, IDictionary<string, string> copies)
+        {
+            // An importer may recreate references (for example textures on embedded FBX
+            // materials) that are not serialized in the asset's YAML or .meta file.
+            // Keep the successfully copied batch and report each owner/dependency pair.
+            foreach (string owner in copies.Values.OrderBy(p => p, StringComparer.OrdinalIgnoreCase))
+                foreach (string dependency in AssetDatabase.GetDependencies(owner, false).Distinct(StringComparer.OrdinalIgnoreCase))
+                    if (copies.TryGetValue(dependency, out string expected))
+                        overview.AddReferenceWarning(owner, dependency, expected, "导入后的副本仍引用原资源");
         }
         static void Rewrite(string path, Dictionary<string, string> map, bool requireYaml)
         {
