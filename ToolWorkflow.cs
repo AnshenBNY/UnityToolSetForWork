@@ -411,11 +411,6 @@ namespace ToolSet
             Status = status;
             Changed?.Invoke();
         }
-        public static void DrawSummary(string owner)
-        {
-            var plan = Page(owner).plan;
-            plan?.overview?.Draw(plan);
-        }
         static void RestoreLast()
         {
             if (Running) return;
@@ -504,17 +499,6 @@ namespace ToolSet
             string owner = OwnerKey(activeOwner);
             var state = Page(owner);
             var plan = state.plan;
-            if (plan?.overview != null)
-            {
-                DrawCopyActions(owner, state);
-                return;
-            }
-            if (owner.StartsWith(nameof(PrefabCopyTool), StringComparison.Ordinal) && !Running)
-            {
-                if (plan == null && state.status != "选择对象 → 生成预览 → 执行 → 查看结果")
-                    EditorGUILayout.HelpBox(state.status, state.buildFailed ? MessageType.Error : MessageType.Info);
-                return;
-            }
             using (new EditorGUILayout.VerticalScope(EditorStyles.helpBox))
             {
                 using (new EditorGUILayout.HorizontalScope())
@@ -529,7 +513,12 @@ namespace ToolSet
                     GUILayout.Height(plan == null ? 100 : Mathf.Clamp(windowHeight * 0.32f, 140, 280))))
                 {
                     state.drawerScroll = drawer.scrollPosition;
-                    DrawOperationDetails(owner, state);
+                    if (plan?.overview != null)
+                    {
+                        DrawCopyActions(owner, state);
+                        plan.overview.Draw(plan);
+                    }
+                    else DrawOperationDetails(owner, state);
                 }
             }
         }
@@ -539,7 +528,7 @@ namespace ToolSet
             var plan = state.plan;
             bool runningHere = Running && ReferenceEquals(Plan, plan);
             string visibleStatus = runningHere ? Status : state.status;
-            EditorGUILayout.HelpBox(visibleStatus, plan != null && plan.blockingErrors.Count > 0 ? MessageType.Error :
+            EditorGUILayout.HelpBox(visibleStatus, state.buildFailed || (plan != null && plan.blockingErrors.Count > 0) ? MessageType.Error :
                 plan != null && plan.errors.Count > 0 ? MessageType.Warning : MessageType.Info);
             using (new EditorGUILayout.HorizontalScope())
             {

@@ -160,7 +160,6 @@ namespace ToolSet
                     ToolWorkflow.DiscardPreparedPlan(SceneWorkflowOwner);
                 }
             }
-            ToolWorkflow.DrawSummary(WorkflowOwner);
         }
 
         private void DrawCompleteCopyWorkspace()
