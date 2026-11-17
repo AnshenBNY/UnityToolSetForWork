@@ -18,6 +18,13 @@
 - 全部编辑器源码与回归测试程序集编译通过，`git diff --check` 通过。完整回归未运行，当前工程缺少 `fish_200004005_skin.fbx` 夹具；本次未做 Unity 窗口人工验收。
 - 专项结果：`C:/Users/iveco/AppData/Local/Temp/ToolSetRegression-4ed302084f8a4b739e92affbb44824f8/dependency-record-regression-results.txt`。
 
+## 2026-09-15
+
+- 完整复制的写入、导入或用户取消仍按事务整批恢复；写入完成后的旧资源引用复查和预制体复查改为保留副本、标记“需处理”并继续完成。
+- 完成状态会明确显示保留结果及待处理问题数量，操作记录保留具体复查错误。
+- `WorkflowPreviewRegression`：通过。覆盖复查步骤失败后计划成功完成、结果保留、问题进入结果列表，以及阻断问题仍禁止执行。
+- 全部编辑器源码与完整回归测试程序集隔离编译通过；当前 Unity Console 无新增编译错误。
+
 ## 2026-09-14
 
 - `SceneSaveRegression`：通过。场景实例不区分来源，修改直接保存到当前连接的预制体；输出目录可以为空，同一目标的多个实例会阻止冲突保存。

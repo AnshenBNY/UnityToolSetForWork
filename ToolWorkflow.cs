@@ -198,6 +198,7 @@ namespace ToolSet
     {
         public string description, progressLabel, state = "待执行";
         public Action<ToolFileTransaction> execute;
+        public bool keepChangesOnFailure;
         public void Run(ToolFileTransaction transaction)
         {
             var errors = new List<string>();
@@ -232,7 +233,14 @@ namespace ToolSet
             if (!fingerprints.ContainsKey(path)) fingerprints[path] = ToolPaths.Fingerprint(path);
             if (File.Exists(path + ".meta") && !fingerprints.ContainsKey(path + ".meta")) fingerprints[path + ".meta"] = ToolPaths.Fingerprint(path + ".meta");
         }
-        public void Add(string description, Action<ToolFileTransaction> action, string progressLabel = null) => steps.Add(new ToolStep { description = description, execute = action, progressLabel = progressLabel });
+        public void Add(string description, Action<ToolFileTransaction> action, string progressLabel = null, bool keepChangesOnFailure = false) =>
+            steps.Add(new ToolStep
+            {
+                description = description,
+                execute = action,
+                progressLabel = progressLabel,
+                keepChangesOnFailure = keepChangesOnFailure
+            });
     }
 
     [InitializeOnLoad] internal static class ToolWorkflow
@@ -352,13 +360,26 @@ namespace ToolSet
                 if (cancel || EditorUtility.DisplayCancelableProgressBar(Plan.title, Plan.steps[next].progressLabel ?? $"{next}/{Plan.steps.Count}", (float)next / Plan.steps.Count))
                     throw new OperationCanceledException("用户取消");
                 var step = Plan.steps[next];
-                step.Run(transaction); step.state = "成功"; next++;
+                try
+                {
+                    step.Run(transaction);
+                    step.state = "成功";
+                }
+                catch (Exception e) when (step.keepChangesOnFailure && !(e is OperationCanceledException))
+                {
+                    step.state = "需处理：" + e.Message;
+                    Plan.errors.Add(step.description + "：" + e.Message);
+                    Debug.LogWarning($"[{Plan.title}] {step.description}：{e.Message}\n已保留此前完成的修改并继续执行。");
+                }
+                next++;
                 SetStatus(Plan.overview != null ? (step.progressLabel ?? "正在处理") + $" · {Mathf.RoundToInt(100f * next / Plan.steps.Count)}%" : $"执行中：{next}/{Plan.steps.Count}");
                 if (next == Plan.steps.Count)
                 {
                     transaction.Complete();
                     Finish(); Plan.phase = ToolPlanPhase.Succeeded;
-                    SetStatus(Plan.overview?.SuccessMessage ?? $"完成：成功 {next}，跳过问题 {Plan.errors.Count}");
+                    string success = Plan.overview?.SuccessMessage ?? $"完成：成功 {next}，跳过问题 {Plan.errors.Count}";
+                    if (Plan.errors.Count > 0) success += $"；结果已保留，另有 {Plan.errors.Count} 项问题待处理";
+                    SetStatus(success);
                     // An optional rescan failing must not roll back a completed operation.
                     try { Plan.completed?.Invoke(); }
                     catch (Exception e) { SetStatus(Status + "；结果复查失败：" + e.Message); Debug.LogException(e); }

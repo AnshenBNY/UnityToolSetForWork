@@ -24,11 +24,13 @@ public static class WorkflowPreviewRegression
         catch (Exception e) { Finish(e); }
     }
 
-    static ToolPlan Plan(string title)
+    static ToolPlan Plan(string title, bool addReviewProblem = false)
     {
         var plan = new ToolPlan { title = title };
         plan.errors.Add("可跳过的问题");
         plan.Add("有效操作", _ => executions++);
+        if (addReviewProblem)
+            plan.Add("结果复查", _ => throw new IOException("复查发现残留引用"), keepChangesOnFailure: true);
         return plan;
     }
 
@@ -37,7 +39,7 @@ public static class WorkflowPreviewRegression
         try
         {
             ToolWorkflow.SetActiveOwner("TabB");
-            ToolWorkflow.Preview(() => second = Plan("B"));
+            ToolWorkflow.Preview(() => second = Plan("B", true));
             EditorApplication.delayCall += VerifyPagesAndStart;
         }
         catch (Exception e) { Finish(e); }
@@ -68,6 +70,9 @@ public static class WorkflowPreviewRegression
         {
             Require(executions == 1, "存在可跳过问题时，有效操作没有执行");
             Require(second.phase == ToolPlanPhase.Succeeded, "含问题的计划未成功完成");
+            Require(second.steps[1].state.StartsWith("需处理"), "复查问题未标记为需处理");
+            Require(second.errors.Count == 2 && second.errors[1].Contains("残留引用"), "复查问题未写入结果");
+            Require(ToolWorkflow.Status.Contains("结果已保留"), "完成状态未说明结果已保留");
             ToolWorkflow.SetActiveOwner("TabC");
             ToolWorkflow.Preview(() =>
             {

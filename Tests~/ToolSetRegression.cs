@@ -245,6 +245,23 @@ public static class ToolSetRegression
             Require(ToolWorkflow.Status.Contains("已恢复"),"honest result");
         });
 
+        Case("Workflow keeps completed output when a review step reports a problem", () =>
+        {
+            string path="Assets/Recover/Test.mat";string before=File.ReadAllText(path);
+            var plan=new ToolPlan{title="non-fatal review"};plan.Watch(path);
+            plan.Add("write",tx=>{tx.Capture(path);File.AppendAllText(path,"# retained\n");});
+            plan.Add("review",tx=>{throw new IOException("old dependency");},keepChangesOnFailure:true);
+            typeof(ToolWorkflow).GetProperty("Plan",BindingFlags.Public|BindingFlags.Static).SetValue(null,plan);
+            ToolWorkflow.Start();
+            var tick=typeof(ToolWorkflow).GetMethod("Tick",BindingFlags.NonPublic|BindingFlags.Static);
+            tick.Invoke(null,null);tick.Invoke(null,null);
+            Require(!ToolWorkflow.Running&&plan.phase==ToolPlanPhase.Succeeded,"review problem should not fail the plan");
+            Require(File.ReadAllText(path).Contains("# retained"),"completed output was rolled back");
+            Require(plan.errors.Any(e=>e.Contains("old dependency"))&&plan.steps[1].state.StartsWith("需处理"),"review problem was not reported");
+            Require(ToolWorkflow.Status.Contains("结果已保留"),"result status does not explain retained output");
+            File.WriteAllText(path,before);AssetDatabase.ImportAsset(path,ImportAssetOptions.ForceSynchronousImport|ImportAssetOptions.ForceUpdate);
+        });
+
         Case("Model importer external material remap points to copied material", () =>
         {
             string model="Assets/FbxFixtures/fish_200004005_skin.fbx";

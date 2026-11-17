@@ -132,7 +132,7 @@ namespace ToolSet
             plan.Add("复查整批副本的旧资源引用", transaction =>
             {
                 ReportRetainedReferences(overview, copies);
-            }, "正在检查整批资源引用");
+            }, "正在检查整批资源引用", keepChangesOnFailure: true);
             foreach (string rootCopy in rootCopies)
                 plan.Add("验证预制体副本 " + rootCopy, transaction =>
             {
@@ -149,7 +149,7 @@ namespace ToolSet
                     }
                 }
                 finally { if (loaded != null) PrefabUtility.UnloadPrefabContents(loaded); }
-            }, "正在检查：" + Path.GetFileName(rootCopy));
+            }, "正在检查：" + Path.GetFileName(rootCopy), keepChangesOnFailure: true);
             plan.completed = () => completed?.Invoke(rootCopies);
             return plan;
         }
