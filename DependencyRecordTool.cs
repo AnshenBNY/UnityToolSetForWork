@@ -240,6 +240,7 @@ namespace ToolSet
         private void DrawExportSection()
         {
             DrawJsonOutputDirectoryControls();
+            EditorGUILayout.HelpBox("引用存档自动排除 Packages 目录中的资源。", MessageType.Info);
             includeBuiltInDependencies = EditorGUILayout.ToggleLeft("包含 Unity 内建依赖（通常不建议）", includeBuiltInDependencies);
             excludeEditorScripts = EditorGUILayout.ToggleLeft("排除 Editor 目录资源", excludeEditorScripts);
             excludeExtensionsInput = EditorGUILayout.TextField("排除扩展名(逗号分隔)", excludeExtensionsInput);
@@ -880,6 +881,13 @@ namespace ToolSet
         private bool ShouldExcludeAssetPath(string assetPath, bool isBuiltIn, HashSet<string> excludedExtensions)
         {
             if (string.IsNullOrEmpty(assetPath))
+            {
+                return true;
+            }
+
+            string normalizedPath = assetPath.Replace('\\', '/');
+            if (string.Equals(normalizedPath, "Packages", StringComparison.OrdinalIgnoreCase) ||
+                normalizedPath.StartsWith("Packages/", StringComparison.OrdinalIgnoreCase))
             {
                 return true;
             }
